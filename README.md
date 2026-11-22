@@ -48,7 +48,7 @@ Requires Xcode Command Line Tools, CMake 3.20+, and Ninja.
 ./scripts/install-macos.sh
 ```
 
-This builds, ad-hoc signs, and tests all 11 `.clap` bundles, then copies them to `~/Library/Audio/Plug-Ins/CLAP/`.
+This builds, ad-hoc signs, and tests all 11 `.clap` bundles, then copies them to `/Library/Audio/Plug-Ins/CLAP/` (pass `--user` to install to `~/Library/Audio/Plug-Ins/CLAP/` instead).
 
 In **FL Studio**: open **Options → Manage Plugins → Find installed plugins** and load any `hdslave` CLAP plug-in.
 
