@@ -1,0 +1,34 @@
+name: Build macOS & Windows CLAP
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  build-macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure & Build
+        run: |
+          cmake -S . -B build/macos -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/macos --parallel
+      - name: Sign & Test
+        run: |
+          for b in build/macos/clap/*.clap; do codesign --force --deep --sign - "$b"; done
+          ./build/macos/host_test build/macos/clap/*.clap
+
+  build-windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure & Build
+        run: |
+          cmake -S . -B build/windows -A x64
+          cmake --build build/windows --config Release --parallel
+      - name: Test
+        shell: pwsh
+        run: |
+          $claps = Get-ChildItem build/windows/clap/Release/*.clap | ForEach-Object { $_.FullName }
+          ./build/windows/Release/host_test.exe @claps
