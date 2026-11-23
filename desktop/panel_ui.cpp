@@ -1416,7 +1416,7 @@ void PanelUI::renderBase()
     {
         c_.fillChamfer (screenCard_, 8, t.panel);
         c_.frameChamfer (screenCard_, 8, t.border);
-        c_.tag (screenCard_.x + 10, screenCard_.y + 5, "MPC PAGE", t.accent, t.onAccent);
+        c_.tag (screenCard_.x + 10, screenCard_.y + 5, "LIVE PAGE", t.accent, t.onAccent);
         c_.text (screenCard_.x + 86, screenCard_.y + 6,
                  Canvas::fit (zoom_ == 2 ? "DRAG / SCROLL = ENCODER   CLICK = PUSH   ARROWS = -/+" : "DRAG / SCROLL = ENC  CLICK = PUSH", screenCard_.w - 96),
                  t.muted);

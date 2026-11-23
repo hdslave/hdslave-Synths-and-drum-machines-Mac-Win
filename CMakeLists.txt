@@ -59,7 +59,8 @@ function(add_hdslave_clap_plugin TARGET_NAME SLUG DISPLAY_NAME PLUGIN_DIR MAIN_S
     endif()
 
     if(MSVC)
-        target_compile_options(${INNER_OBJ_TARGET} PRIVATE /O2 /W2 /wd4244 /wd4267 /wd4305 /wd4996)
+        target_include_directories(${INNER_OBJ_TARGET} PRIVATE "${DESKTOP_DIR}/win32/compat")
+        target_compile_options(${INNER_OBJ_TARGET} PRIVATE /O2 /W2 /FI"${DESKTOP_DIR}/win32/compat/msvc_compat.h" /wd4244 /wd4267 /wd4305 /wd4996)
     else()
         target_compile_options(${INNER_OBJ_TARGET} PRIVATE -O3 -ffp-contract=fast -fno-math-errno -fno-trapping-math -fvisibility=hidden)
     endif()
