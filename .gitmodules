@@ -1,0 +1,44 @@
+[submodule "TB-MPC-3-P-0"]
+	path = TB-MPC-3-P-0
+	url = https://github.com/hdslave/TB-MPC-3-P-0-Synthesizer.git
+	branch = main
+[submodule "Psychic"]
+	path = Psychic
+	url = https://github.com/hdslave/hdslave-Psychic-Synth.git
+	branch = main
+[submodule "Necronomicon"]
+	path = Necronomicon
+	url = https://github.com/hdslave/hdslave-Necronomicon-Synth.git
+	branch = main
+[submodule "Foundry"]
+	path = Foundry
+	url = https://github.com/hdslave/hdslave-Foundry-Drum-Machine.git
+	branch = main
+[submodule "Anvil"]
+	path = Anvil
+	url = https://github.com/hdslave/hdslave-Anvil-Synth.git
+	branch = main
+[submodule "MoonBass"]
+	path = MoonBass
+	url = https://github.com/hdslave/hdslave-MoonBass-Synth.git
+	branch = main
+[submodule "Cortex-Filter"]
+	path = Cortex-Filter
+	url = https://github.com/hdslave/hdslave-Cortex-Filter.git
+	branch = main
+[submodule "Machine"]
+	path = Machine
+	url = https://github.com/hdslave/hdslave-Machine.git
+	branch = main
+[submodule "Mystik"]
+	path = Mystik
+	url = https://github.com/hdslave/hdslave-Mystik-Synth.git
+	branch = main
+[submodule "Nexus"]
+	path = Nexus
+	url = https://github.com/hdslave/hdslave-Nexus-Synth.git
+	branch = main
+[submodule "Reverie"]
+	path = Reverie
+	url = https://github.com/hdslave/hdslave-Reverie-Synth.git
+	branch = main

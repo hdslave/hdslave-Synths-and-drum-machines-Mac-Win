@@ -1,4 +1,0 @@
-Mutable Instruments' Plaits DSP and stmlib, by Emilie Gillet, MIT licence (licenses/LICENSE-MIT-mutable-instruments.txt).
-plaits/: github.com/pichenettes/eurorack, commit f4cfa7697095a28d292bff758beb51deb49b5a86 (plaits/dsp, plaits/resources.*)
-stmlib/: github.com/pichenettes/stmlib, commit e3bd7c9cc00e4364166f9905c0509b6ffd0535ec (the commit eurorack pins): stmlib.h, dsp/, utils/
-Changes made here are listed in NOTES.md in this folder.
