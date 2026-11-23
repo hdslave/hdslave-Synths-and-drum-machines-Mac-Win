@@ -8,6 +8,7 @@
 #define NOMINMAX
 #endif
 
+#if !defined(__clang__)
 #include <cmath>
 #include <cstdint>
 #include <immintrin.h>
@@ -26,11 +27,6 @@ static inline int __builtin_ctz (unsigned int x)
     return _BitScanForward (&idx, x) ? int (idx) : 32;
 }
 
-static inline double __builtin_nan (const char*)
-{
-    return std::numeric_limits<double>::quiet_NaN();
-}
-
 static inline unsigned int __builtin_ia32_stmxcsr()
 {
     return _mm_getcsr();
@@ -40,4 +36,5 @@ static inline void __builtin_ia32_ldmxcsr (unsigned int x)
 {
     _mm_setcsr (x);
 }
+#endif
 #endif

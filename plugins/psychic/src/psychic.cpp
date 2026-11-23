@@ -14,7 +14,11 @@
 #include <cstdio>
 #include <cstring>
 #include <new>
+#ifdef _WIN32
+#include <thread>
+#else
 #include <sched.h>
+#endif
 
 namespace psychic
 {
@@ -76,7 +80,11 @@ Plugin& of (const clap_plugin* p) { return *static_cast<Plugin*> (p->plugin_data
 void lockMain (Plugin& p)
 {
     for (bool free = false; ! p.exchange.compare_exchange_weak (free, true, std::memory_order_acquire); free = false)
+#ifdef _WIN32
+        std::this_thread::yield();
+#else
         sched_yield();
+#endif
 }
 bool tryLockAudio (Plugin& p)
 {
