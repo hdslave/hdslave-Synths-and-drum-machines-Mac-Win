@@ -210,7 +210,11 @@ using f4 = float __attribute__ ((vector_size (16)));
     const f4 one = { 1.0f, 1.0f, 1.0f, 1.0f }, none = {};
     const f4 a = t / dt, b = (t - 1.0f) / dt;
     f4 aa = a * a;
+#if defined(__aarch64__) || defined(_M_ARM64)
     asm ("" : "+w"(aa)); // rounded on its own, as the compiler does it in blep, not fused into the subtraction
+#elif defined(__x86_64__) || defined(_M_X64)
+    asm ("" : "+x"(aa));
+#endif
     const f4 rise = a + a - aa - 1.0f, fall = b * b + b + b + 1.0f;
     return t < dt ? rise : (t > one - dt ? fall : none);
 }

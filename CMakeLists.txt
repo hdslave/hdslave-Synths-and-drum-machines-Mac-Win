@@ -22,7 +22,7 @@ add_library(nexus_eurorack STATIC
     ${NEXUS_EURORACK_SOURCES}
     "${CMAKE_SOURCE_DIR}/plugins/nexus/src/plaits_voice.cc"
 )
-target_compile_definitions(nexus_eurorack PRIVATE TEST)
+target_compile_definitions(nexus_eurorack PRIVATE TEST _USE_MATH_DEFINES NOMINMAX)
 target_include_directories(nexus_eurorack PUBLIC
     "${CMAKE_SOURCE_DIR}/plugins/nexus/third_party/eurorack"
     "${CMAKE_SOURCE_DIR}/plugins/nexus/src"
