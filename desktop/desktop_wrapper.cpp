@@ -15,6 +15,84 @@ extern "C" const clap_plugin_entry_t hdslave_inner_clap_entry;
 namespace hdslave_desktop
 {
 
+// The events the inner plug-in sees: the host's, plus the panel's edits and mapped CCs, in time order (CLAP's rule;
+// the plug-ins cut their blocks at each event). Lives in the DesktopPlugin; process and flush never overlap.
+struct MergedInputEvents
+{
+    static constexpr uint32_t kMaxInjected = 1024;
+    static constexpr uint32_t kMaxTotal = 8192;
+
+    const clap_input_events_t* hostIn = nullptr;
+    uint32_t hostCount = 0;
+    clap_event_param_value_t injected[kMaxInjected] {};
+    uint32_t injectedCount = 0;
+    const clap_event_header_t* order[kMaxTotal] {};
+    uint32_t orderCount = 0;
+    bool passthrough = false; // too many events to merge: the host's alone
+
+    void reset (const clap_input_events_t* in)
+    {
+        hostIn = in;
+        hostCount = (in && in->size) ? in->size (in) : 0;
+        injectedCount = 0;
+        orderCount = 0;
+        passthrough = false;
+    }
+
+    void addInjected (uint32_t time, clap_id paramId, double value)
+    {
+        if (injectedCount >= kMaxInjected) return;
+        auto& ev = injected[injectedCount++];
+        ev.header.size = sizeof (clap_event_param_value_t);
+        ev.header.time = time;
+        ev.header.space_id = CLAP_CORE_EVENT_SPACE_ID;
+        ev.header.type = CLAP_EVENT_PARAM_VALUE;
+        ev.header.flags = 0;
+        ev.param_id = paramId;
+        ev.cookie = nullptr;
+        ev.note_id = -1;
+        ev.port_index = -1;
+        ev.channel = -1;
+        ev.key = -1;
+        ev.value = value;
+    }
+
+    // Merge by time: injected events go just after host events of the same time (a CC lands after its own MIDI
+    // event), and the panel's (time 0) before the block's first host event at time > 0.
+    void finish()
+    {
+        if (injectedCount == 0) { passthrough = true; return; }
+        if (hostCount + injectedCount > kMaxTotal) { passthrough = true; return; }
+        // Injected events arrive in time order already (UI at 0, then CCs as the host's events are scanned).
+        uint32_t h = 0, j = 0;
+        while (h < hostCount || j < injectedCount)
+        {
+            const clap_event_header_t* he = h < hostCount ? hostIn->get (hostIn, h) : nullptr;
+            if (h < hostCount && he == nullptr) { ++h; continue; }
+            if (j < injectedCount && (he == nullptr || injected[j].header.time < he->time))
+                order[orderCount++] = &injected[j++].header;
+            else
+                order[orderCount++] = he, ++h;
+        }
+    }
+
+    static uint32_t CLAP_ABI sizeCb (const clap_input_events_t* list)
+    {
+        const auto* self = static_cast<const MergedInputEvents*> (list->ctx);
+        return self->passthrough ? self->hostCount : self->orderCount;
+    }
+
+    static const clap_event_header_t* CLAP_ABI getCb (const clap_input_events_t* list, uint32_t index)
+    {
+        const auto* self = static_cast<const MergedInputEvents*> (list->ctx);
+        if (self->passthrough)
+            return (self->hostIn && index < self->hostCount) ? self->hostIn->get (self->hostIn, index) : nullptr;
+        return index < self->orderCount ? self->order[index] : nullptr;
+    }
+
+    clap_input_events_t asClapList() { return clap_input_events_t { this, sizeCb, getCb }; }
+};
+
 namespace
 {
 
@@ -22,24 +100,88 @@ DesktopPlugin& of (const clap_plugin_t* p) { return *static_cast<DesktopPlugin*>
 
 // Proxy host callbacks ----------------------------------------------------------------------------------------
 
+// The inner plug-in only ever sees proxyHost. Every host extension it asks for is a trampoline here that calls the
+// real host's function with the real clap_host: handing the host's own vtable out with our proxy pointer would make
+// the host read our struct as its own (FL Studio crashed in Fruity Wrapper on the first preset load that way).
+
+DesktopPlugin* fromHost (const clap_host_t* host) { return host ? static_cast<DesktopPlugin*> (host->host_data) : nullptr; }
+
 void CLAP_ABI proxyScreenRequestPaint (const clap_host_t* host)
 {
-    auto* dp = static_cast<DesktopPlugin*> (host->host_data);
-    if (dp)
-        dp->screenDirty.store (true, std::memory_order_release);
+    if (auto* dp = fromHost (host))
+        dp->screenRequested.store (true, std::memory_order_release);
 }
-
 const clap_host_melodee_screen_t kProxyHostScreen { proxyScreenRequestPaint };
+
+void CLAP_ABI tParamsRescan (const clap_host_t* h, clap_param_rescan_flags flags)
+{
+    auto* dp = fromHost (h);
+    if (dp && dp->hostParams && dp->hostParams->rescan) dp->hostParams->rescan (dp->realHost, flags);
+    if (dp) dp->markAllDirty();
+}
+void CLAP_ABI tParamsClear (const clap_host_t* h, clap_id id, clap_param_clear_flags flags)
+{
+    auto* dp = fromHost (h);
+    if (dp && dp->hostParams && dp->hostParams->clear) dp->hostParams->clear (dp->realHost, id, flags);
+}
+void CLAP_ABI tParamsRequestFlush (const clap_host_t* h)
+{
+    auto* dp = fromHost (h);
+    if (dp && dp->hostParams && dp->hostParams->request_flush) dp->hostParams->request_flush (dp->realHost);
+}
+const clap_host_params_t kProxyHostParams { tParamsRescan, tParamsClear, tParamsRequestFlush };
+
+void CLAP_ABI tPresetOnError (const clap_host_t* h, uint32_t kind, const char* location, const char* key, int32_t err, const char* msg)
+{
+    auto* dp = fromHost (h);
+    if (dp && dp->hostPresetLoad && dp->hostPresetLoad->on_error) dp->hostPresetLoad->on_error (dp->realHost, kind, location, key, err, msg);
+}
+void CLAP_ABI tPresetLoaded (const clap_host_t* h, uint32_t kind, const char* location, const char* key)
+{
+    auto* dp = fromHost (h);
+    if (dp && dp->hostPresetLoad && dp->hostPresetLoad->loaded) dp->hostPresetLoad->loaded (dp->realHost, kind, location, key);
+}
+const clap_host_preset_load_t kProxyHostPresetLoad { tPresetOnError, tPresetLoaded };
+
+void CLAP_ABI tStateMarkDirty (const clap_host_t* h)
+{
+    auto* dp = fromHost (h);
+    if (dp && dp->hostState && dp->hostState->mark_dirty) dp->hostState->mark_dirty (dp->realHost);
+}
+const clap_host_state_t kProxyHostState { tStateMarkDirty };
+
+void CLAP_ABI tLog (const clap_host_t* h, clap_log_severity severity, const char* msg)
+{
+    auto* dp = fromHost (h);
+    if (dp && dp->hostLog && dp->hostLog->log) dp->hostLog->log (dp->realHost, severity, msg);
+}
+const clap_host_log_t kProxyHostLog { tLog };
+
+bool CLAP_ABI tIsMainThread (const clap_host_t* h)
+{
+    auto* dp = fromHost (h);
+    return dp && dp->hostThreadCheck && dp->hostThreadCheck->is_main_thread ? dp->hostThreadCheck->is_main_thread (dp->realHost) : true;
+}
+bool CLAP_ABI tIsAudioThread (const clap_host_t* h)
+{
+    auto* dp = fromHost (h);
+    return dp && dp->hostThreadCheck && dp->hostThreadCheck->is_audio_thread ? dp->hostThreadCheck->is_audio_thread (dp->realHost) : true;
+}
+const clap_host_thread_check_t kProxyHostThreadCheck { tIsMainThread, tIsAudioThread };
 
 const void* CLAP_ABI proxyGetExtension (const clap_host_t* host, const char* extensionId)
 {
-    auto* dp = static_cast<DesktopPlugin*> (host->host_data);
+    auto* dp = fromHost (host);
     if (!dp || !extensionId) return nullptr;
-    if (std::strcmp (extensionId, CLAP_EXT_MELODEE_SCREEN_HOST) == 0)
-        return &kProxyHostScreen;
-    if (dp->realHost && dp->realHost->get_extension)
-        return dp->realHost->get_extension (dp->realHost, extensionId);
-    return nullptr;
+    dp->resolveHostExtensions();
+    if (std::strcmp (extensionId, CLAP_EXT_MELODEE_SCREEN_HOST) == 0) return &kProxyHostScreen;
+    if (std::strcmp (extensionId, CLAP_EXT_PARAMS) == 0) return dp->hostParams ? &kProxyHostParams : nullptr;
+    if (std::strcmp (extensionId, CLAP_EXT_PRESET_LOAD) == 0 || std::strcmp (extensionId, CLAP_EXT_PRESET_LOAD_COMPAT) == 0)
+        return dp->hostPresetLoad ? &kProxyHostPresetLoad : nullptr;
+    if (std::strcmp (extensionId, CLAP_EXT_STATE) == 0) return dp->hostState ? &kProxyHostState : nullptr;
+    if (std::strcmp (extensionId, CLAP_EXT_LOG) == 0) return dp->hostLog ? &kProxyHostLog : nullptr;
+    if (std::strcmp (extensionId, CLAP_EXT_THREAD_CHECK) == 0) return dp->hostThreadCheck ? &kProxyHostThreadCheck : nullptr;
+    return nullptr; // anything else: not offered (never the real host's vtable)
 }
 
 void CLAP_ABI proxyRequestRestart (const clap_host_t* host)
@@ -137,57 +279,6 @@ void discoverFactoryPresets (DesktopPlugin& dp)
 
 // Allocation-free merged input event list for audio thread / flush --------------------------------------------
 
-struct MergedInputEvents
-{
-    static constexpr uint32_t kMaxInjected = 512;
-
-    const clap_input_events_t* hostIn = nullptr;
-    uint32_t hostCount = 0;
-
-    clap_event_param_value_t injected[kMaxInjected] {};
-    uint32_t injectedCount = 0;
-
-    void addInjected (uint32_t time, clap_id paramId, double value)
-    {
-        if (injectedCount >= kMaxInjected) return;
-        auto& ev = injected[injectedCount++];
-        ev.header.size = sizeof (clap_event_param_value_t);
-        ev.header.time = time;
-        ev.header.space_id = CLAP_CORE_EVENT_SPACE_ID;
-        ev.header.type = CLAP_EVENT_PARAM_VALUE;
-        ev.header.flags = 0;
-        ev.param_id = paramId;
-        ev.cookie = nullptr;
-        ev.note_id = -1;
-        ev.port_index = -1;
-        ev.channel = -1;
-        ev.key = -1;
-        ev.value = value;
-    }
-
-    static uint32_t CLAP_ABI sizeCb (const clap_input_events_t* list)
-    {
-        const auto* self = static_cast<const MergedInputEvents*> (list->ctx);
-        return self->hostCount + self->injectedCount;
-    }
-
-    static const clap_event_header_t* CLAP_ABI getCb (const clap_input_events_t* list, uint32_t index)
-    {
-        const auto* self = static_cast<const MergedInputEvents*> (list->ctx);
-        if (index < self->injectedCount)
-            return &self->injected[index].header;
-        uint32_t hi = index - self->injectedCount;
-        if (self->hostIn && hi < self->hostCount)
-            return self->hostIn->get (self->hostIn, hi);
-        return nullptr;
-    }
-
-    clap_input_events_t asClapList()
-    {
-        return clap_input_events_t { this, sizeCb, getCb };
-    }
-};
-
 void pushHostParamValue (const clap_output_events_t* out, uint32_t time, clap_id id, double value)
 {
     if (!out || !out->try_push) return;
@@ -220,80 +311,58 @@ void pushHostParamGesture (const clap_output_events_t* out, uint32_t time, clap_
     out->try_push (out, &ev.header);
 }
 
-void drainUiAndMidiEvents (DesktopPlugin& dp, const clap_input_events_t* in, const clap_output_events_t* out,
-                           MergedInputEvents& merged)
+void drainUiAndMidiEvents (DesktopPlugin& dp, MergedInputEvents& merged, const clap_input_events_t* in, const clap_output_events_t* out)
 {
-    merged.hostIn = in;
-    merged.hostCount = (in && in->size) ? in->size (in) : 0;
-    merged.injectedCount = 0;
+    merged.reset (in);
 
-    // 1. Drain UI parameter events -> inject into inner plugin AND notify DAW host
+    // 1. The panel's edits: to the inner plug-in, and to the host with their gestures (automation, Last Tweaked).
     UiParamEvent uev {};
     while (dp.uiToAudio.pop (uev))
     {
         if (uev.kind == UiEventKind::GestureBegin)
-        {
             pushHostParamGesture (out, 0, uev.paramId, true);
-        }
         else if (uev.kind == UiEventKind::GestureEnd)
-        {
             pushHostParamGesture (out, 0, uev.paramId, false);
-        }
-        else if (uev.kind == UiEventKind::Value)
+        else
         {
             merged.addInjected (0, uev.paramId, uev.value);
             pushHostParamValue (out, 0, uev.paramId, uev.value);
         }
     }
 
-    // 2. Scan incoming MIDI CC messages for MIDI Learn and CC->Param mapping
+    // 2. MIDI CCs: learn, then mapped CC -> parameter at the CC's own frame.
     for (uint32_t i = 0; i < merged.hostCount; ++i)
     {
         const auto* h = in->get (in, i);
-        if (!h || h->space_id != CLAP_CORE_EVENT_SPACE_ID || h->type != CLAP_EVENT_MIDI)
-            continue;
+        if (!h || h->space_id != CLAP_CORE_EVENT_SPACE_ID || h->type != CLAP_EVENT_MIDI) continue;
         const auto* m = reinterpret_cast<const clap_event_midi_t*> (h);
-        if ((m->data[0] & 0xF0u) != 0xB0u)
-            continue;
+        if ((m->data[0] & 0xF0u) != 0xB0u) continue;
 
         const uint8_t cc = m->data[1] & 0x7Fu;
         const uint8_t val = m->data[2] & 0x7Fu;
         dp.lastMidiCc.store (int (cc), std::memory_order_relaxed);
 
-        // MIDI Learn binding
-        uint32_t target = dp.midiLearnTarget.load (std::memory_order_acquire);
+        const uint32_t target = dp.midiLearnTarget.load (std::memory_order_acquire);
         if (target != CLAP_INVALID_ID && target != DesktopPlugin::kLearnArmedNoParam)
         {
-            // Clear any previous CC mapped to this same param
             for (int c = 0; c < 128; ++c)
-            {
-                if (dp.ccMap[c].load (std::memory_order_relaxed) == target)
-                    dp.ccMap[c].store (CLAP_INVALID_ID, std::memory_order_relaxed);
-            }
+                if (dp.ccMap[c].load (std::memory_order_relaxed) == target) dp.ccMap[c].store (CLAP_INVALID_ID, std::memory_order_relaxed);
             dp.ccMap[cc].store (target, std::memory_order_release);
             dp.midiLearnTarget.store (CLAP_INVALID_ID, std::memory_order_release);
-            dp.uiDirty.store (true, std::memory_order_release);
         }
 
-        // Apply mapped CC
         const clap_id mappedId = dp.ccMap[cc].load (std::memory_order_acquire);
-        if (mappedId != CLAP_INVALID_ID)
-        {
-            int idx = dp.findParamIndex (mappedId);
-            if (idx >= 0)
-            {
-                const auto& p = dp.params[size_t (idx)];
-                double norm = double (val) / 127.0;
-                double mappedVal = p.minVal + norm * (p.maxVal - p.minVal);
-                if (p.isStepped())
-                    mappedVal = std::clamp (std::round (mappedVal), p.minVal, p.maxVal);
-
-                merged.addInjected (h->time, mappedId, mappedVal);
-                pushHostParamValue (out, h->time, mappedId, mappedVal);
-                dp.uiDirty.store (true, std::memory_order_release);
-            }
-        }
+        if (mappedId == CLAP_INVALID_ID) continue;
+        const int idx = dp.findParamIndex (mappedId);
+        if (idx < 0) continue;
+        const auto& p = dp.params[size_t (idx)];
+        double v = p.minVal + (double (val) / 127.0) * p.range();
+        if (p.isStepped()) v = std::clamp (std::round (v), p.minVal, p.maxVal);
+        merged.addInjected (h->time, mappedId, v);
+        pushHostParamValue (out, h->time, mappedId, v);
     }
+
+    merged.finish();
 }
 
 // Memory stream helpers for CLAP_EXT_STATE envelope -----------------------------------------------------------
@@ -379,9 +448,8 @@ void CLAP_ABI wrapParamsFlush (const clap_plugin_t* p, const clap_input_events_t
 {
     auto& dp = of (p);
     if (!dp.innerParams) return;
-    MergedInputEvents merged;
-    drainUiAndMidiEvents (dp, in, out, merged);
-    clap_input_events_t inList = merged.asClapList();
+    drainUiAndMidiEvents (dp, *dp.merged, in, out);
+    clap_input_events_t inList = dp.merged->asClapList();
     dp.innerParams->flush (dp.inner, &inList, out);
 }
 
@@ -450,8 +518,7 @@ bool CLAP_ABI wrapStateLoad (const clap_plugin_t* p, const clap_istream_t* strea
                 for (int i = 0; i < 128; ++i)
                     dp.ccMap[i].store (ccTable[i], std::memory_order_release);
             }
-            dp.uiDirty.store (true, std::memory_order_release);
-            dp.screenWholeNeeded = true;
+            dp.markAllDirty();
             return true;
         }
     }
@@ -461,10 +528,7 @@ bool CLAP_ABI wrapStateLoad (const clap_plugin_t* p, const clap_istream_t* strea
     clap_istream_t memIn { &innerIn, MemIStream::readCb };
     bool ok = dp.innerState->load (dp.inner, &memIn);
     if (ok)
-    {
-        dp.uiDirty.store (true, std::memory_order_release);
-        dp.screenWholeNeeded = true;
-    }
+        dp.markAllDirty();
     return ok;
 }
 
@@ -477,10 +541,7 @@ bool CLAP_ABI wrapPresetLoadFromLocation (const clap_plugin_t* p, uint32_t locat
     if (!dp.innerPresetLoad) return false;
     bool ok = dp.innerPresetLoad->from_location (dp.inner, locationKind, location, loadKey);
     if (ok)
-    {
-        dp.uiDirty.store (true, std::memory_order_release);
-        dp.screenWholeNeeded = true;
-    }
+        dp.markAllDirty();
     return ok;
 }
 
@@ -599,18 +660,18 @@ bool CLAP_ABI guiGetResizeHints (const clap_plugin_t*, clap_gui_resize_hints_t* 
 bool CLAP_ABI guiAdjustSize (const clap_plugin_t*, uint32_t* width, uint32_t* height)
 {
     if (!width || !height) return false;
-    *width = std::clamp (*width, 900u, 2560u);
-    *height = std::clamp (*height, 560u, 1600u);
+    *width = std::clamp (*width, kMinGuiWidth, kMaxGuiWidth);
+    *height = std::clamp (*height, kMinGuiHeight, kMaxGuiHeight);
     return true;
 }
 
 bool CLAP_ABI guiSetSize (const clap_plugin_t* p, uint32_t width, uint32_t height)
 {
     auto& dp = of (p);
-    dp.guiWidth = std::clamp (width, 900u, 2560u);
-    dp.guiHeight = std::clamp (height, 560u, 1600u);
+    dp.guiWidth = std::clamp (width, kMinGuiWidth, kMaxGuiWidth);
+    dp.guiHeight = std::clamp (height, kMinGuiHeight, kMaxGuiHeight);
     if (dp.ui)
-        dp.ui->rebuildLayout (int (dp.guiWidth), int (dp.guiHeight));
+        dp.ui->setSize (int (dp.guiWidth), int (dp.guiHeight), dp.ui->scale());
     if (dp.platformGui)
         return platformGuiSetSize (dp.platformGui, dp.guiWidth, dp.guiHeight);
     return true;
@@ -658,8 +719,7 @@ bool CLAP_ABI wrapInit (const clap_plugin_t* p)
         dp.innerPresetLoad = static_cast<const clap_plugin_preset_load_t*> (dp.inner->get_extension (dp.inner, CLAP_EXT_PRESET_LOAD_COMPAT));
     dp.innerScreen = static_cast<const clap_plugin_melodee_screen_t*> (dp.inner->get_extension (dp.inner, CLAP_EXT_MELODEE_SCREEN));
 
-    if (dp.realHost && dp.realHost->get_extension)
-        dp.hostParams = static_cast<const clap_host_params_t*> (dp.realHost->get_extension (dp.realHost, CLAP_EXT_PARAMS));
+    dp.resolveHostExtensions();
 
     // Cache all parameter descriptors
     dp.params.clear();
@@ -685,11 +745,18 @@ bool CLAP_ABI wrapInit (const clap_plugin_t* p)
             }
         }
     }
+    dp.uiValue.assign (dp.params.size(), 0.0);
+    dp.uiHoldUntil.assign (dp.params.size(), 0);
+    for (size_t i = 0; i < dp.params.size(); ++i)
+        dp.uiValue[i] = dp.getParamValue (dp.params[i].id);
 
     discoverFactoryPresets (dp);
 
     if (dp.innerScreen)
+    {
         dp.screenPixels.assign (size_t (MELODEE_SCREEN_WIDTH * MELODEE_SCREEN_HEIGHT), 0xFF0A0C10u);
+        dp.refreshScreenKnobs();
+    }
 
     return true;
 }
@@ -745,19 +812,66 @@ clap_process_status CLAP_ABI wrapProcess (const clap_plugin_t* p, const clap_pro
     if (proc->transport)
         dp.transportPlaying.store ((proc->transport->flags & CLAP_TRANSPORT_IS_PLAYING) != 0, std::memory_order_relaxed);
 
-    MergedInputEvents merged;
-    drainUiAndMidiEvents (dp, proc->in_events, proc->out_events, merged);
+    drainUiAndMidiEvents (dp, *dp.merged, proc->in_events, proc->out_events);
 
     clap_process_t wrapped = *proc;
-    clap_input_events_t inList = merged.asClapList();
+    clap_input_events_t inList = dp.merged->asClapList();
     wrapped.in_events = &inList;
     return dp.inner->process (dp.inner, &wrapped);
 }
+
+// Test hook (com.hdslave.desktop.debug/1) for off-screen rendering & input tests in tests/host_test.cpp
+bool debugUiOpen (const clap_plugin_t* p)
+{
+    auto& dp = of (p);
+    if (!dp.ui) dp.ui = new (std::nothrow) PanelUI (&dp);
+    return dp.ui != nullptr;
+}
+void debugUiClose (const clap_plugin_t* p)
+{
+    auto& dp = of (p);
+    delete dp.ui;
+    dp.ui = nullptr;
+}
+const uint32_t* debugUiRender (const clap_plugin_t* p, int w, int h, int scale, int* physW, int* physH)
+{
+    auto& dp = of (p);
+    if (!dp.ui) return nullptr;
+    dp.ui->setSize (w, h, scale);
+    dp.ui->update (nowMs());
+    if (physW) *physW = dp.ui->physWidth();
+    if (physH) *physH = dp.ui->physHeight();
+    return dp.ui->pixels();
+}
+void debugUiMouse (const clap_plugin_t* p, int kind, float x, float y, int button, uint32_t mods, float delta, int clicks)
+{
+    auto& dp = of (p);
+    if (!dp.ui) return;
+    if (kind == 0) dp.ui->mouseDown (x, y, button, mods, clicks);
+    else if (kind == 1) dp.ui->mouseMove (x, y, mods);
+    else if (kind == 2) dp.ui->mouseUp (x, y, button, mods);
+    else if (kind == 3) dp.ui->wheel (x, y, 0.0f, delta, false, mods);
+}
+int debugPresetCount (const clap_plugin_t* p) { return int (of (p).presets.size()); }
+bool debugPresetLoad (const clap_plugin_t* p, int index) { return of (p).loadPresetByIndex (index); }
+double debugMsPerRender (const clap_plugin_t* p, int w, int h, int scale)
+{
+    auto& dp = of (p);
+    if (!dp.ui) return 0.0;
+    dp.ui->setSize (w, h, scale);
+    dp.ui->invalidateAll();
+    dp.ui->update (nowMs());
+    return dp.ui->lastRenderMs();
+}
+const hdslave_desktop_debug_api_t kDebugApi {
+    1, debugUiOpen, debugUiClose, debugUiRender, debugUiMouse, debugPresetCount, debugPresetLoad, debugMsPerRender
+};
 
 const void* CLAP_ABI wrapGetExtension (const clap_plugin_t* p, const char* id)
 {
     auto& dp = of (p);
     if (!id) return nullptr;
+    if (std::strcmp (id, "com.hdslave.desktop.debug/1") == 0) return &kDebugApi;
     if (std::strcmp (id, CLAP_EXT_GUI) == 0) return &kWrapGuiExt;
     if (std::strcmp (id, CLAP_EXT_PARAMS) == 0) return &kWrapParamsExt;
     if (std::strcmp (id, CLAP_EXT_STATE) == 0) return &kWrapStateExt;
@@ -848,6 +962,7 @@ const clap_plugin_t* CLAP_ABI wrapFactoryCreate (const clap_plugin_factory_t*, c
     }
 
     dp->theme = themeForPluginId (desc->id);
+    dp->pluginId = desc->id ? desc->id : "";
     dp->pluginName = desc->name ? desc->name : "hdslave";
     dp->pluginVersion = desc->version ? desc->version : "1.0.0";
 
@@ -883,13 +998,38 @@ const void* CLAP_ABI wrapEntryGetFactory (const char* factoryId)
 
 // DesktopPlugin methods ---------------------------------------------------------------------------------------
 
+uint64_t nowMs()
+{
+    using namespace std::chrono;
+    return uint64_t (duration_cast<milliseconds> (steady_clock::now().time_since_epoch()).count());
+}
+
 DesktopPlugin::DesktopPlugin()
 {
+    merged = new MergedInputEvents();
     for (int i = 0; i < 128; ++i)
         ccMap[i].store (CLAP_INVALID_ID, std::memory_order_relaxed);
 }
 
-DesktopPlugin::~DesktopPlugin() = default;
+DesktopPlugin::~DesktopPlugin()
+{
+    delete merged;
+    merged = nullptr;
+}
+
+void DesktopPlugin::resolveHostExtensions()
+{
+    if (hostExtsResolved || !realHost || !realHost->get_extension)
+        return;
+    hostExtsResolved = true;
+    hostParams = static_cast<const clap_host_params_t*> (realHost->get_extension (realHost, CLAP_EXT_PARAMS));
+    hostPresetLoad = static_cast<const clap_host_preset_load_t*> (realHost->get_extension (realHost, CLAP_EXT_PRESET_LOAD));
+    if (!hostPresetLoad)
+        hostPresetLoad = static_cast<const clap_host_preset_load_t*> (realHost->get_extension (realHost, CLAP_EXT_PRESET_LOAD_COMPAT));
+    hostState = static_cast<const clap_host_state_t*> (realHost->get_extension (realHost, CLAP_EXT_STATE));
+    hostLog = static_cast<const clap_host_log_t*> (realHost->get_extension (realHost, CLAP_EXT_LOG));
+    hostThreadCheck = static_cast<const clap_host_thread_check_t*> (realHost->get_extension (realHost, CLAP_EXT_THREAD_CHECK));
+}
 
 int DesktopPlugin::findParamIndex (clap_id id) const
 {
@@ -908,6 +1048,15 @@ double DesktopPlugin::getParamValue (clap_id id) const
     return 0.0;
 }
 
+double DesktopPlugin::displayValue (int index) const
+{
+    if (index < 0 || index >= int (params.size()))
+        return 0.0;
+    if (size_t (index) < uiHoldUntil.size() && nowMs() < uiHoldUntil[size_t (index)])
+        return uiValue[size_t (index)];
+    return getParamValue (params[size_t (index)].id);
+}
+
 std::string DesktopPlugin::formatParamValue (clap_id id, double value) const
 {
     char buf[96] {};
@@ -917,7 +1066,7 @@ std::string DesktopPlugin::formatParamValue (clap_id id, double value) const
     return std::string (buf);
 }
 
-void DesktopPlugin::enqueueUiParam (UiEventKind kind, clap_id id, double value)
+void DesktopPlugin::enqueue (UiEventKind kind, clap_id id, double value)
 {
     uiToAudio.push ({ kind, id, value });
     if (hostParams && hostParams->request_flush)
@@ -926,19 +1075,64 @@ void DesktopPlugin::enqueueUiParam (UiEventKind kind, clap_id id, double value)
         realHost->request_process (realHost);
 }
 
+void DesktopPlugin::beginEdit (int index)
+{
+    if (index < 0 || index >= int (params.size())) return;
+    const double cur = displayValue (index);
+    if (size_t (index) < uiValue.size())
+    {
+        uiValue[size_t (index)] = cur;
+        uiHoldUntil[size_t (index)] = nowMs() + 250;
+    }
+    enqueue (UiEventKind::GestureBegin, params[size_t (index)].id, cur);
+}
+
+void DesktopPlugin::setEdit (int index, double value)
+{
+    if (index < 0 || index >= int (params.size())) return;
+    const auto& p = params[size_t (index)];
+    value = std::clamp (value, p.minVal, p.maxVal);
+    if (p.isStepped()) value = std::clamp (std::round (value), p.minVal, p.maxVal);
+    if (size_t (index) < uiValue.size())
+    {
+        uiValue[size_t (index)] = value;
+        uiHoldUntil[size_t (index)] = nowMs() + 250;
+    }
+    enqueue (UiEventKind::Value, p.id, value);
+    screenRequested.store (true, std::memory_order_release);
+}
+
+void DesktopPlugin::endEdit (int index)
+{
+    if (index < 0 || index >= int (params.size())) return;
+    const double cur = displayValue (index);
+    if (size_t (index) < uiHoldUntil.size())
+        uiHoldUntil[size_t (index)] = nowMs() + 150;
+    enqueue (UiEventKind::GestureEnd, params[size_t (index)].id, cur);
+}
+
+void DesktopPlugin::setValueOnce (int index, double value)
+{
+    if (index < 0 || index >= int (params.size())) return;
+    beginEdit (index);
+    setEdit (index, value);
+    endEdit (index);
+}
+
 bool DesktopPlugin::loadPresetByIndex (int idx)
 {
     if (!innerPresetLoad || idx < 0 || idx >= int (presets.size()))
         return false;
-    bool ok = innerPresetLoad->from_location (inner, CLAP_PRESET_DISCOVERY_LOCATION_PLUGIN,
-                                              nullptr, presets[size_t (idx)].loadKey.c_str());
+    resolveHostExtensions();
+    const bool ok = innerPresetLoad->from_location (inner, CLAP_PRESET_DISCOVERY_LOCATION_PLUGIN,
+                                                    nullptr, presets[size_t (idx)].loadKey.c_str());
     if (ok)
     {
         currentPresetIndex = idx;
-        screenWholeNeeded = true;
-        uiDirty.store (true, std::memory_order_release);
-        if (hostParams && hostParams->rescan)
-            hostParams->rescan (realHost, CLAP_PARAM_RESCAN_VALUES);
+        markAllDirty();
+        refreshScreenKnobs();
+        if (hostState && hostState->mark_dirty)
+            hostState->mark_dirty (realHost);
     }
     return ok;
 }
@@ -979,39 +1173,77 @@ int DesktopPlugin::countMappedCc() const
     return n;
 }
 
-void DesktopPlugin::sendScreenInput (uint32_t kind, int32_t value, bool shift)
+void DesktopPlugin::refreshScreenKnobs()
 {
-    if (!innerScreen || !innerScreen->input) return;
-    melodee_screen_input_t inp { kind, value, shift };
-    innerScreen->input (inner, &inp);
-    screenDirty.store (true, std::memory_order_release);
+    if (!innerScreen || !innerScreen->knobs)
+        return;
+    clap_id ids[3] { CLAP_INVALID_ID, CLAP_INVALID_ID, CLAP_INVALID_ID };
+    innerScreen->knobs (inner, ids);
+    for (int i = 0; i < 3; ++i)
+        screenKnobIds[i] = ids[i];
 }
 
-void DesktopPlugin::updateEmbeddedScreen (uint64_t nowMs)
+void DesktopPlugin::sendScreenInput (uint32_t kind, int32_t value)
 {
-    if (!innerScreen || !innerScreen->paint) return;
+    if (!innerScreen || !innerScreen->input) return;
+    melodee_screen_input_t inp { kind, value, screenShift };
+    innerScreen->input (inner, &inp);
+    refreshScreenKnobs();
+    screenRequested.store (true, std::memory_order_release);
+}
+
+bool DesktopPlugin::paintScreen (uint64_t now)
+{
+    if (!innerScreen || !innerScreen->paint) return false;
     if (screenPixels.size() != size_t (MELODEE_SCREEN_WIDTH * MELODEE_SCREEN_HEIGHT))
+    {
         screenPixels.assign (size_t (MELODEE_SCREEN_WIDTH * MELODEE_SCREEN_HEIGHT), 0xFF0A0C10u);
+        screenWholeNeeded = true;
+    }
+
+    refreshScreenKnobs();
 
     melodee_screen_canvas_t canvas {};
     canvas.pixels = screenPixels.data();
     canvas.width = MELODEE_SCREEN_WIDTH;
     canvas.height = MELODEE_SCREEN_HEIGHT;
     canvas.stride = MELODEE_SCREEN_WIDTH;
-    canvas.now_ms = nowMs;
+    canvas.now_ms = now;
     canvas.accent = theme.accent;
     for (int i = 0; i < 3; ++i)
     {
-        canvas.knobs[i].position = -1;
-        canvas.knobs[i].engaged = true;
+        const int idx = (screenKnobIds[i] != CLAP_INVALID_ID) ? findParamIndex (screenKnobIds[i]) : -1;
+        if (idx >= 0)
+        {
+            const auto& p = params[size_t (idx)];
+            const double r = p.range();
+            const double n = r > 0.0 ? std::clamp ((displayValue (idx) - p.minVal) / r, 0.0, 1.0) : 0.0;
+            canvas.knobs[i].position = int16_t (std::round (n * 127.0));
+            canvas.knobs[i].engaged = true;
+        }
+        else
+        {
+            canvas.knobs[i].position = -1;
+            canvas.knobs[i].engaged = false;
+        }
     }
-    canvas.shift = false;
+    canvas.shift = screenShift;
     canvas.playing = transportPlaying.load (std::memory_order_relaxed);
     canvas.whole = screenWholeNeeded;
 
-    innerScreen->paint (inner, &canvas);
+    const bool drew = innerScreen->paint (inner, &canvas);
     screenWholeNeeded = false;
-    screenDirty.store (false, std::memory_order_release);
+    screenRequested.store (false, std::memory_order_release);
+    refreshScreenKnobs();
+    return drew;
+}
+
+void DesktopPlugin::markAllDirty()
+{
+    std::fill (uiHoldUntil.begin(), uiHoldUntil.end(), 0);
+    screenWholeNeeded = true;
+    screenRequested.store (true, std::memory_order_release);
+    if (ui) ui->invalidateAll();
 }
 
 } // namespace hdslave_desktop

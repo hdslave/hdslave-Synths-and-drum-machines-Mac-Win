@@ -1,6 +1,7 @@
 #import <Cocoa/Cocoa.h>
-#include <chrono>
-#include <vector>
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
 
 #include "desktop_wrapper.h"
 #include "panel_ui.h"
@@ -9,19 +10,29 @@
 #define HDSLAVE_OBJC_VIEW_CLASS HdslavePanelView
 #endif
 
+static uint32_t modsFromEvent (NSEvent* event)
+{
+    uint32_t m = 0;
+    const NSEventModifierFlags f = [event modifierFlags];
+    if (f & NSEventModifierFlagShift) m |= hdslave_desktop::kModShift;
+    if (f & NSEventModifierFlagOption) m |= hdslave_desktop::kModAlt;
+    if (f & NSEventModifierFlagCommand) m |= hdslave_desktop::kModCmd;
+    return m;
+}
+
 @interface HDSLAVE_OBJC_VIEW_CLASS : NSView
 {
 @public
     hdslave_desktop::DesktopPlugin* _plugin;
-    std::vector<uint32_t> _framebuffer;
-    int _fbWidth;
-    int _fbHeight;
     NSTimer* _timer;
     NSTrackingArea* _trackingArea;
+    int _scale;
 }
 - (instancetype)initWithPlugin:(hdslave_desktop::DesktopPlugin*)plugin frame:(NSRect)frame;
 - (void)startTimer;
 - (void)stopTimer;
+- (void)syncSize;
+- (void)pumpFrame;
 @end
 
 @implementation HDSLAVE_OBJC_VIEW_CLASS
@@ -32,11 +43,11 @@
     if (self)
     {
         _plugin = plugin;
-        _fbWidth = 0;
-        _fbHeight = 0;
         _timer = nil;
         _trackingArea = nil;
+        _scale = 2;
         self.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+        [self setAllowedTouchTypes:NSTouchTypeMaskIndirect];
     }
     return self;
 }
@@ -53,20 +64,54 @@
     [super dealloc];
 }
 
-- (BOOL)isFlipped
+- (BOOL)isFlipped { return YES; }
+- (BOOL)isOpaque { return YES; }
+- (BOOL)acceptsFirstResponder { return YES; }
+- (BOOL)acceptsFirstMouse:(NSEvent*)event { (void)event; return YES; }
+
+- (int)backingScaleInt
 {
-    return YES;
+    CGFloat sf = 2.0;
+    if (self.window)
+        sf = self.window.backingScaleFactor;
+    else if ([NSScreen mainScreen])
+        sf = [[NSScreen mainScreen] backingScaleFactor];
+    return std::clamp (int (std::round (sf)), 1, 3);
 }
 
-- (BOOL)acceptsFirstResponder
+- (void)syncSize
 {
-    return YES;
+    if (!_plugin || !_plugin->ui) return;
+    _scale = [self backingScaleInt];
+    const int w = std::max (320, int (std::round (self.bounds.size.width)));
+    const int h = std::max (240, int (std::round (self.bounds.size.height)));
+    _plugin->ui->setSize (w, h, _scale);
 }
 
-- (BOOL)acceptsFirstMouse:(NSEvent*)event
+- (void)viewDidMoveToWindow
 {
-    (void)event;
-    return YES;
+    [super viewDidMoveToWindow];
+    [self syncSize];
+    if (self.window)
+    {
+        if (_plugin && _plugin->ui) _plugin->ui->invalidateAll();
+        [self pumpFrame];
+    }
+}
+
+- (void)viewDidChangeBackingProperties
+{
+    [super viewDidChangeBackingProperties];
+    [self syncSize];
+    if (_plugin && _plugin->ui) _plugin->ui->invalidateAll();
+    [self pumpFrame];
+}
+
+- (void)setFrameSize:(NSSize)newSize
+{
+    [super setFrameSize:newSize];
+    [self syncSize];
+    [self pumpFrame];
 }
 
 - (void)updateTrackingAreas
@@ -78,7 +123,7 @@
         [_trackingArea release];
         _trackingArea = nil;
     }
-    NSTrackingAreaOptions opts = NSTrackingMouseMoved | NSTrackingActiveInKeyWindow
+    NSTrackingAreaOptions opts = NSTrackingMouseMoved | NSTrackingMouseEnteredAndExited
                                | NSTrackingActiveAlways | NSTrackingInVisibleRect;
     _trackingArea = [[NSTrackingArea alloc] initWithRect:self.bounds options:opts owner:self userInfo:nil];
     [self addTrackingArea:_trackingArea];
@@ -87,7 +132,7 @@
 - (void)startTimer
 {
     if (_timer) return;
-    _timer = [NSTimer scheduledTimerWithTimeInterval:(1.0 / 30.0)
+    _timer = [NSTimer scheduledTimerWithTimeInterval:(1.0 / 60.0)
                                               target:self
                                             selector:@selector(onTick:)
                                             userInfo:nil
@@ -104,53 +149,73 @@
     }
 }
 
+- (void)pumpFrame
+{
+    if (!_plugin || !_plugin->ui) return;
+    [self syncSize];
+    const hdslave_desktop::Rect dirty = _plugin->ui->update (hdslave_desktop::nowMs());
+    if (!dirty.empty())
+        [self setNeedsDisplayInRect:NSMakeRect (dirty.x, dirty.y, dirty.w, dirty.h)];
+}
+
 - (void)onTick:(NSTimer*)timer
 {
     (void)timer;
-    if (!_plugin || !_plugin->ui) return;
-    [self setNeedsDisplay:YES];
+    [self pumpFrame];
 }
 
 - (void)drawRect:(NSRect)dirtyRect
 {
-    (void)dirtyRect;
     if (!_plugin || !_plugin->ui) return;
+    [self syncSize];
+    if (_plugin->ui->physWidth() <= 0 || _plugin->ui->physHeight() <= 0)
+        _plugin->ui->update (hdslave_desktop::nowMs());
 
-    const int w = std::max (1, int (self.bounds.size.width));
-    const int h = std::max (1, int (self.bounds.size.height));
-
-    if (w != _fbWidth || h != _fbHeight)
-    {
-        _fbWidth = w;
-        _fbHeight = h;
-        _framebuffer.assign (size_t (w * h), 0xFF111318u);
-    }
-
-    using namespace std::chrono;
-    const uint64_t nowMs = uint64_t (duration_cast<milliseconds> (steady_clock::now().time_since_epoch()).count());
-    _plugin->ui->render (_framebuffer.data(), _fbWidth, _fbHeight, nowMs);
+    const uint32_t* px = _plugin->ui->pixels();
+    const int pw = _plugin->ui->physWidth();
+    const int ph = _plugin->ui->physHeight();
+    const int sc = _plugin->ui->scale();
+    if (!px || pw <= 0 || ph <= 0) return;
 
     CGContextRef ctx = [[NSGraphicsContext currentContext] CGContext];
     if (!ctx) return;
 
     CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
-    CGDataProviderRef provider = CGDataProviderCreateWithData (
-        nullptr, _framebuffer.data(), size_t (_fbWidth * _fbHeight) * 4, nullptr);
-    CGImageRef img = CGImageCreate (
-        size_t (_fbWidth), size_t (_fbHeight), 8, 32, size_t (_fbWidth * 4), cs,
+    CGDataProviderRef provider = CGDataProviderCreateWithData (nullptr, px, size_t (pw) * size_t (ph) * 4, nullptr);
+    CGImageRef fullImg = CGImageCreate (
+        size_t (pw), size_t (ph), 8, 32, size_t (pw * 4), cs,
         kCGBitmapByteOrder32Little | kCGImageAlphaNoneSkipFirst,
         provider, nullptr, false, kCGRenderingIntentDefault);
 
-    if (img)
+    if (fullImg)
     {
-        // Since isFlipped == YES, flip CTM so CGContextDrawImage draws right-side up
-        CGContextSaveGState (ctx);
-        CGContextTranslateCTM (ctx, 0.0, CGFloat (_fbHeight));
-        CGContextScaleCTM (ctx, 1.0, -1.0);
-        CGContextSetInterpolationQuality (ctx, kCGInterpolationNone);
-        CGContextDrawImage (ctx, CGRectMake (0, 0, CGFloat (_fbWidth), CGFloat (_fbHeight)), img);
-        CGContextRestoreGState (ctx);
-        CGImageRelease (img);
+        // Crop to dirtyRect in physical pixels so dragging a knob only blits that small rect.
+        const int rx0 = std::clamp (int (std::floor (dirtyRect.origin.x)) * sc, 0, pw);
+        const int ry0 = std::clamp (int (std::floor (dirtyRect.origin.y)) * sc, 0, ph);
+        const int rx1 = std::clamp (int (std::ceil (dirtyRect.origin.x + dirtyRect.size.width)) * sc, 0, pw);
+        const int ry1 = std::clamp (int (std::ceil (dirtyRect.origin.y + dirtyRect.size.height)) * sc, 0, ph);
+
+        if (rx1 > rx0 && ry1 > ry0)
+        {
+            CGRect cropRect = CGRectMake (rx0, ry0, rx1 - rx0, ry1 - ry0);
+            CGImageRef subImg = CGImageCreateWithImageInRect (fullImg, cropRect);
+            if (subImg)
+            {
+                const CGFloat lx = CGFloat (rx0) / CGFloat (sc);
+                const CGFloat ly = CGFloat (ry0) / CGFloat (sc);
+                const CGFloat lw = CGFloat (rx1 - rx0) / CGFloat (sc);
+                const CGFloat lh = CGFloat (ry1 - ry0) / CGFloat (sc);
+
+                CGContextSaveGState (ctx);
+                CGContextTranslateCTM (ctx, lx, ly + lh);
+                CGContextScaleCTM (ctx, 1.0, -1.0);
+                CGContextSetInterpolationQuality (ctx, kCGInterpolationNone);
+                CGContextDrawImage (ctx, CGRectMake (0, 0, lw, lh), subImg);
+                CGContextRestoreGState (ctx);
+                CGImageRelease (subImg);
+            }
+        }
+        CGImageRelease (fullImg);
     }
 
     CGDataProviderRelease (provider);
@@ -165,58 +230,92 @@
 - (void)mouseDown:(NSEvent*)event
 {
     if (!_plugin || !_plugin->ui) return;
+    if (self.window) [self.window makeFirstResponder:self];
     NSPoint pt = [self localPoint:event];
-    bool shift = ([event modifierFlags] & NSEventModifierFlagShift) != 0;
-    bool dbl = ([event clickCount] >= 2);
-    _plugin->ui->onMouseDown (int (pt.x), int (pt.y), 0, shift, dbl);
-    [self setNeedsDisplay:YES];
+    _plugin->ui->mouseDown (float (pt.x), float (pt.y), 0, modsFromEvent (event), int ([event clickCount]));
+    [self pumpFrame];
 }
 
 - (void)rightMouseDown:(NSEvent*)event
 {
     if (!_plugin || !_plugin->ui) return;
+    if (self.window) [self.window makeFirstResponder:self];
     NSPoint pt = [self localPoint:event];
-    bool shift = ([event modifierFlags] & NSEventModifierFlagShift) != 0;
-    _plugin->ui->onMouseDown (int (pt.x), int (pt.y), 1, shift, false);
-    [self setNeedsDisplay:YES];
+    _plugin->ui->mouseDown (float (pt.x), float (pt.y), 1, modsFromEvent (event), int ([event clickCount]));
+    [self pumpFrame];
 }
 
 - (void)mouseDragged:(NSEvent*)event
 {
     if (!_plugin || !_plugin->ui) return;
     NSPoint pt = [self localPoint:event];
-    bool shift = ([event modifierFlags] & NSEventModifierFlagShift) != 0;
-    _plugin->ui->onMouseMove (int (pt.x), int (pt.y), shift);
-    [self setNeedsDisplay:YES];
+    _plugin->ui->mouseMove (float (pt.x), float (pt.y), modsFromEvent (event));
+    [self pumpFrame];
 }
 
 - (void)mouseMoved:(NSEvent*)event
 {
     if (!_plugin || !_plugin->ui) return;
     NSPoint pt = [self localPoint:event];
-    bool shift = ([event modifierFlags] & NSEventModifierFlagShift) != 0;
-    _plugin->ui->onMouseMove (int (pt.x), int (pt.y), shift);
-    [self setNeedsDisplay:YES];
+    _plugin->ui->mouseMove (float (pt.x), float (pt.y), modsFromEvent (event));
+    [self pumpFrame];
 }
 
 - (void)mouseUp:(NSEvent*)event
 {
     if (!_plugin || !_plugin->ui) return;
     NSPoint pt = [self localPoint:event];
-    _plugin->ui->onMouseUp (int (pt.x), int (pt.y), 0);
-    [self setNeedsDisplay:YES];
+    _plugin->ui->mouseUp (float (pt.x), float (pt.y), 0, modsFromEvent (event));
+    [self pumpFrame];
+}
+
+- (void)mouseExited:(NSEvent*)event
+{
+    (void)event;
+    if (!_plugin || !_plugin->ui) return;
+    _plugin->ui->mouseExit();
+    [self pumpFrame];
 }
 
 - (void)scrollWheel:(NSEvent*)event
 {
     if (!_plugin || !_plugin->ui) return;
     NSPoint pt = [self localPoint:event];
-    bool shift = ([event modifierFlags] & NSEventModifierFlagShift) != 0;
+    const bool precise = [event hasPreciseScrollingDeltas];
+    float dx = float ([event scrollingDeltaX]);
     float dy = float ([event scrollingDeltaY]);
-    if ([event hasPreciseScrollingDeltas])
-        dy *= 0.15f;
-    _plugin->ui->onMouseWheel (int (pt.x), int (pt.y), dy, shift);
-    [self setNeedsDisplay:YES];
+    _plugin->ui->wheel (float (pt.x), float (pt.y), dx, dy, precise, modsFromEvent (event));
+    [self pumpFrame];
+}
+
+- (void)rotateWithEvent:(NSEvent*)event
+{
+    if (!_plugin || !_plugin->ui) return;
+    NSPoint pt = [self localPoint:event];
+    _plugin->ui->rotate (float (pt.x), float (pt.y), float ([event rotation]));
+    [self pumpFrame];
+}
+
+- (void)keyDown:(NSEvent*)event
+{
+    if (!_plugin || !_plugin->ui) { [super keyDown:event]; return; }
+    int k = -1;
+    switch ([event keyCode])
+    {
+        case 123: k = 0; break; // Left
+        case 124: k = 1; break; // Right
+        case 126: k = 2; break; // Up
+        case 125: k = 3; break; // Down
+        case 36:  case 49: case 76: k = 4; break; // Return / Space / Enter
+        case 53:  k = 5; break; // Escape
+        default: break;
+    }
+    if (k >= 0 && _plugin->ui->key (k))
+    {
+        [self pumpFrame];
+        return;
+    }
+    [super keyDown:event];
 }
 
 @end
@@ -266,8 +365,10 @@ bool platformGuiSetParent (PlatformGui* gui, const clap_window_t* window)
     [gui->view removeFromSuperview];
     [gui->view setFrame:NSMakeRect (0, 0, CGFloat (gui->plugin->guiWidth), CGFloat (gui->plugin->guiHeight))];
     [parent addSubview:gui->view];
+    [gui->view syncSize];
+    if (gui->plugin && gui->plugin->ui) gui->plugin->ui->invalidateAll();
     [gui->view startTimer];
-    [gui->view setNeedsDisplay:YES];
+    [gui->view pumpFrame];
     return true;
 }
 
@@ -275,8 +376,10 @@ bool platformGuiShow (PlatformGui* gui)
 {
     if (!gui || !gui->view) return false;
     [gui->view setHidden:NO];
+    [gui->view syncSize];
+    if (gui->plugin && gui->plugin->ui) gui->plugin->ui->invalidateAll();
     [gui->view startTimer];
-    [gui->view setNeedsDisplay:YES];
+    [gui->view pumpFrame];
     return true;
 }
 
@@ -292,7 +395,6 @@ bool platformGuiSetSize (PlatformGui* gui, uint32_t width, uint32_t height)
 {
     if (!gui || !gui->view) return false;
     [gui->view setFrameSize:NSMakeSize (CGFloat (width), CGFloat (height))];
-    [gui->view setNeedsDisplay:YES];
     return true;
 }
 

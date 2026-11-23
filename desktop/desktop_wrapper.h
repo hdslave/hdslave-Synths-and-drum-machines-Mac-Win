@@ -9,8 +9,7 @@
 
 #include "plugin_theme.h"
 
-// Include the shared Melodee screen extension definition so the desktop wrapper
-// can host every plugin's live 320x218 visual display inside the expanded panel.
+// The Melodee screen extension (the MPC page's CLAP interface; MIT, see the plug-ins' melodee_screen.h).
 #ifndef CLAP_EXT_MELODEE_SCREEN
 static const char CLAP_EXT_MELODEE_SCREEN[] = "com.hdslave.melodee.screen/1";
 static const char CLAP_EXT_MELODEE_SCREEN_HOST[] = "com.hdslave.melodee.screen-host/1";
@@ -71,9 +70,14 @@ typedef struct clap_host_melodee_screen
 namespace hdslave_desktop
 {
 
-// Expanded high-resolution logical canvas dimensions
 constexpr uint32_t kDefaultGuiWidth = 1360;
 constexpr uint32_t kDefaultGuiHeight = 820;
+constexpr uint32_t kMinGuiWidth = 1000;
+constexpr uint32_t kMinGuiHeight = 640;
+constexpr uint32_t kMaxGuiWidth = 3200;
+constexpr uint32_t kMaxGuiHeight = 2000;
+
+uint64_t nowMs();
 
 enum class UiEventKind : uint8_t
 {
@@ -89,7 +93,7 @@ struct UiParamEvent
     double value;
 };
 
-// Lock-free SPSC queue from UI (main thread) -> Audio / Flush
+// Single producer (main thread) / single consumer (process or flush, never both at once) queue.
 template <size_t Capacity>
 class SpscQueue
 {
@@ -98,18 +102,15 @@ public:
     {
         const size_t w = writeIdx_.load (std::memory_order_relaxed);
         const size_t next = (w + 1) % Capacity;
-        if (next == readIdx_.load (std::memory_order_acquire))
-            return false;
+        if (next == readIdx_.load (std::memory_order_acquire)) return false;
         buf_[w] = item;
         writeIdx_.store (next, std::memory_order_release);
         return true;
     }
-
     bool pop (UiParamEvent& out)
     {
         const size_t r = readIdx_.load (std::memory_order_relaxed);
-        if (r == writeIdx_.load (std::memory_order_acquire))
-            return false;
+        if (r == writeIdx_.load (std::memory_order_acquire)) return false;
         out = buf_[r];
         readIdx_.store ((r + 1) % Capacity, std::memory_order_release);
         return true;
@@ -134,7 +135,9 @@ struct CachedParamInfo
 
     bool isStepped() const { return (flags & CLAP_PARAM_IS_STEPPED) != 0; }
     bool isEnum() const { return (flags & CLAP_PARAM_IS_ENUM) != 0; }
-    bool isBool() const { return isStepped() && minVal == 0.0 && maxVal == 1.0 && !isEnum(); }
+    bool isBool() const { return isStepped() && minVal == 0.0 && maxVal == 1.0; }
+    bool isBipolar() const { return minVal < 0.0 && maxVal > 0.0 && (minVal + maxVal) == 0.0; }
+    double range() const { return maxVal - minVal; }
 };
 
 struct PresetEntry
@@ -145,12 +148,14 @@ struct PresetEntry
 
 class PanelUI;
 struct PlatformGui;
+struct MergedInputEvents;
 
 struct DesktopPlugin
 {
     clap_plugin_t clap {};
     const clap_host_t* realHost = nullptr;
-    clap_host_t proxyHost {};
+    clap_host_t proxyHost {}; // what the inner plug-in sees; host_data points back here
+    MergedInputEvents* merged = nullptr;
 
     const clap_plugin_t* inner = nullptr;
     const clap_plugin_params_t* innerParams = nullptr;
@@ -158,40 +163,46 @@ struct DesktopPlugin
     const clap_plugin_preset_load_t* innerPresetLoad = nullptr;
     const clap_plugin_melodee_screen_t* innerScreen = nullptr;
 
+    // The real host's extensions, always called with realHost.
     const clap_host_params_t* hostParams = nullptr;
+    const clap_host_preset_load_t* hostPresetLoad = nullptr;
+    const clap_host_state_t* hostState = nullptr;
+    const clap_host_log_t* hostLog = nullptr;
+    const clap_host_thread_check_t* hostThreadCheck = nullptr;
+    bool hostExtsResolved = false;
+    void resolveHostExtensions();
 
     PluginTheme theme {};
+    std::string pluginId;
     std::string pluginName;
     std::string pluginVersion;
 
-    // Parameter metadata cache (built on main thread in init())
     std::vector<CachedParamInfo> params;
-    // Fast lookup from clap_id -> index in params (or -1)
     int findParamIndex (clap_id id) const;
 
-    // Factory presets discovered from inner preset discovery factory
     std::vector<PresetEntry> presets;
     int currentPresetIndex = -1;
 
-    // MIDI CC mapping: 128 CCs -> clap_id (CLAP_INVALID_ID = unmapped)
+    // MIDI CC map: CC number -> param id (CLAP_INVALID_ID when unmapped).
     std::atomic<uint32_t> ccMap[128];
-    // MIDI Learn state: CLAP_INVALID_ID = off, 0xFFFFFFFE = armed waiting for control click,
-    // otherwise = waiting for incoming MIDI CC to bind to this param_id
     static constexpr uint32_t kLearnArmedNoParam = 0xFFFFFFFEu;
     std::atomic<uint32_t> midiLearnTarget { CLAP_INVALID_ID };
     std::atomic<int> lastMidiCc { -1 };
 
-    // UI -> Audio parameter queue
-    SpscQueue<1024> uiToAudio;
+    SpscQueue<2048> uiToAudio;
 
-    // Live embedded 320x218 MPC screen state
+    // What the panel shows while the user drags: the value it sent, until the plug-in has caught up. Main thread.
+    std::vector<double> uiValue;
+    std::vector<uint64_t> uiHoldUntil;
+
+    // The live MPC page.
     std::vector<uint32_t> screenPixels;
     bool screenWholeNeeded = true;
-    std::atomic<bool> screenDirty { true };
-    std::atomic<bool> uiDirty { true };
+    std::atomic<bool> screenRequested { true };
     std::atomic<bool> transportPlaying { false };
+    clap_id screenKnobIds[3] { CLAP_INVALID_ID, CLAP_INVALID_ID, CLAP_INVALID_ID };
+    bool screenShift = false;
 
-    // GUI state
     PanelUI* ui = nullptr;
     PlatformGui* platformGui = nullptr;
     uint32_t guiWidth = kDefaultGuiWidth;
@@ -200,20 +211,29 @@ struct DesktopPlugin
     DesktopPlugin();
     ~DesktopPlugin();
 
-    // Helpers called by UI (main thread)
+    // Main-thread helpers for the panel.
     double getParamValue (clap_id id) const;
+    double displayValue (int index) const; // the drag value while held, else the plug-in's
     std::string formatParamValue (clap_id id, double value) const;
-    void enqueueUiParam (UiEventKind kind, clap_id id, double value);
+    void beginEdit (int index);
+    void setEdit (int index, double value);
+    void endEdit (int index);
+    void setValueOnce (int index, double value); // begin + value + end
     bool loadPresetByIndex (int idx);
     int findCcForParam (clap_id id) const;
     void clearCcForParam (clap_id id);
     void clearAllCc();
     int countMappedCc() const;
-    void sendScreenInput (uint32_t kind, int32_t value, bool shift);
-    void updateEmbeddedScreen (uint64_t nowMs);
+    void sendScreenInput (uint32_t kind, int32_t value);
+    bool paintScreen (uint64_t now); // true when the page changed
+    void refreshScreenKnobs();
+    void markAllDirty();
+
+private:
+    void enqueue (UiEventKind kind, clap_id id, double value);
 };
 
-// Platform GUI hooks implemented in gui_macos.mm (Apple) or gui_win32.cpp (Windows)
+// Platform GUI (gui_macos.mm / gui_win32.cpp).
 PlatformGui* createPlatformGui (DesktopPlugin* plugin);
 void destroyPlatformGui (PlatformGui* gui);
 bool platformGuiSetParent (PlatformGui* gui, const clap_window_t* window);
@@ -223,3 +243,21 @@ bool platformGuiSetSize (PlatformGui* gui, uint32_t width, uint32_t height);
 const char* platformGuiApiName();
 
 } // namespace hdslave_desktop
+
+// Test hook (tests/host_test.cpp): drives the panel off-screen to render snapshots and simulate input.
+extern "C"
+{
+typedef struct hdslave_desktop_debug_api
+{
+    uint32_t version;
+    bool (*ui_open) (const clap_plugin_t* plugin);
+    void (*ui_close) (const clap_plugin_t* plugin);
+    // Renders the whole panel at logical w x h and device scale; returns the physical pixels (owned by the panel).
+    const uint32_t* (*ui_render) (const clap_plugin_t* plugin, int w, int h, int scale, int* physW, int* physH);
+    // kind: 0 down, 1 move/drag, 2 up, 3 wheel. mods: bit0 shift, bit1 alt/cmd (fine / reset).
+    void (*ui_mouse) (const clap_plugin_t* plugin, int kind, float x, float y, int button, uint32_t mods, float delta, int clicks);
+    int (*preset_count) (const clap_plugin_t* plugin);
+    bool (*preset_load) (const clap_plugin_t* plugin, int index);
+    double (*ms_per_full_render) (const clap_plugin_t* plugin, int w, int h, int scale);
+} hdslave_desktop_debug_api_t;
+}
