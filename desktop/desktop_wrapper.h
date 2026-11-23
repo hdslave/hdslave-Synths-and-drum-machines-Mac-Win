@@ -155,7 +155,19 @@ struct DesktopPlugin
     clap_plugin_t clap {};
     const clap_host_t* realHost = nullptr;
     clap_host_t proxyHost {}; // what the inner plug-in sees; host_data points back here
-    MergedInputEvents* merged = nullptr;
+    MergedInputEvents* mergedProcess = nullptr;
+    MergedInputEvents* mergedFlush = nullptr;
+
+    // Lifecycle / thread guards for safe FL Studio interop
+    std::atomic<bool> active { false };
+    std::atomic<bool> processing { false };
+    std::atomic<bool> inAudioCall { false };
+    std::atomic<uint64_t> lastProcessMs { 0 };
+    std::atomic<uint32_t> pendingRescanFlags { 0 };
+    std::atomic<bool> pendingStateDirty { false };
+    bool inInternalPresetLoad = false;
+    bool inScreenInput = false;
+    clap_id openGestureParamId = CLAP_INVALID_ID;
 
     const clap_plugin_t* inner = nullptr;
     const clap_plugin_params_t* innerParams = nullptr;

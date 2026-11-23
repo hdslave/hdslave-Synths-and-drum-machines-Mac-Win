@@ -43,6 +43,11 @@ struct StrictHostCtx
     int flushRequests = 0;
     int presetLoadedCalls = 0;
     int stateDirtyCalls = 0;
+    int callbackRequests = 0;
+    clap_id openGesture = CLAP_INVALID_ID;
+    uint32_t lastOutTime = 0;
+    int bareParamValues = 0;
+    int outParamValues = 0;
 };
 
 void checkHostPtr (const clap_host_t* h, const char* fn)
@@ -76,13 +81,23 @@ void CLAP_ABI hParamsFlush (const clap_host_t* h)
 }
 const clap_host_params_t kHostParams { hParamsRescan, hParamsClear, hParamsFlush };
 
-void CLAP_ABI hPresetError (const clap_host_t* h, uint32_t, const char*, const char*, int32_t, const char*)
+void CLAP_ABI hPresetError (const clap_host_t* h, uint32_t, const char* loc, const char* key, int32_t, const char*)
 {
     checkHostPtr (h, "host_preset_load.on_error");
+    if (!loc || !key)
+    {
+        std::fprintf (stderr, "FAIL: host_preset_load.on_error received NULL string!\n");
+        std::abort();
+    }
 }
-void CLAP_ABI hPresetLoaded (const clap_host_t* h, uint32_t, const char*, const char*)
+void CLAP_ABI hPresetLoaded (const clap_host_t* h, uint32_t, const char* loc, const char* key)
 {
     checkHostPtr (h, "host_preset_load.loaded");
+    if (!loc || !key)
+    {
+        std::fprintf (stderr, "FAIL: host_preset_load.loaded received NULL location/key (crashes FL Studio)!\n");
+        std::abort();
+    }
     ++static_cast<StrictHostCtx*> (h->host_data)->presetLoadedCalls;
 }
 const clap_host_preset_load_t kHostPresetLoad { hPresetError, hPresetLoaded };
@@ -105,11 +120,44 @@ const void* CLAP_ABI hostGetExtension (const clap_host_t* h, const char* id)
 }
 void CLAP_ABI hostRequestRestart (const clap_host_t* h) { checkHostPtr (h, "host.request_restart"); }
 void CLAP_ABI hostRequestProcess (const clap_host_t* h) { checkHostPtr (h, "host.request_process"); }
-void CLAP_ABI hostRequestCallback (const clap_host_t* h) { checkHostPtr (h, "host.request_callback"); }
+void CLAP_ABI hostRequestCallback (const clap_host_t* h)
+{
+    checkHostPtr (h, "host.request_callback");
+    ++static_cast<StrictHostCtx*> (h->host_data)->callbackRequests;
+}
 
 uint32_t CLAP_ABI emptyInSize (const clap_input_events_t*) { return 0; }
 const clap_event_header_t* CLAP_ABI emptyInGet (const clap_input_events_t*, uint32_t) { return nullptr; }
-bool CLAP_ABI emptyOutPush (const clap_output_events_t*, const clap_event_header_t*) { return true; }
+bool CLAP_ABI strictOutPush (const clap_output_events_t* list, const clap_event_header_t* h)
+{
+    auto* ctx = static_cast<StrictHostCtx*> (list->ctx);
+    if (!ctx || !h) return false;
+    if (h->time < ctx->lastOutTime)
+    {
+        std::fprintf (stderr, "FAIL: out_events non-monotonic time (%u < %u)!\n", h->time, ctx->lastOutTime);
+        std::abort();
+    }
+    ctx->lastOutTime = h->time;
+    if (h->space_id == CLAP_CORE_EVENT_SPACE_ID)
+    {
+        if (h->type == CLAP_EVENT_PARAM_GESTURE_BEGIN)
+            ctx->openGesture = reinterpret_cast<const clap_event_param_gesture_t*> (h)->param_id;
+        else if (h->type == CLAP_EVENT_PARAM_GESTURE_END)
+            ctx->openGesture = CLAP_INVALID_ID;
+        else if (h->type == CLAP_EVENT_PARAM_VALUE)
+        {
+            ++ctx->outParamValues;
+            const auto* pv = reinterpret_cast<const clap_event_param_value_t*> (h);
+            if (ctx->openGesture != pv->param_id)
+            {
+                ++ctx->bareParamValues;
+                std::fprintf (stderr, "FAIL: bare CLAP_EVENT_PARAM_VALUE without gesture (id=%u)!\n", pv->param_id);
+                std::abort();
+            }
+        }
+    }
+    return true;
+}
 
 struct MemStream
 {
@@ -271,10 +319,11 @@ bool testOnePlugin (const std::string& clapPath, const std::string& snapDir)
     clap_audio_buffer_t inBuf { inPtrs, nullptr, 2, 0, 0 };
     clap_audio_buffer_t outBuf { outPtrs, nullptr, 2, 0, 0 };
     clap_input_events_t inEv { nullptr, emptyInSize, emptyInGet };
-    clap_output_events_t outEv { nullptr, emptyOutPush };
+    clap_output_events_t outEv { &ctx, strictOutPush };
 
     for (int blk = 0; blk < 4; ++blk)
     {
+        ctx.lastOutTime = 0;
         clap_process_t proc {};
         proc.steady_time = blk * 256;
         proc.frames_count = 256;
@@ -292,7 +341,7 @@ bool testOnePlugin (const std::string& clapPath, const std::string& snapDir)
         }
     }
 
-    // 5. Strict Preset Load stress test (exercises proxy host trampolines — prevents FL Studio crash!) + UI render
+    // 5. Strict Preset Load stress test (exercises proxy host trampolines + deferred on_main_thread!) + UI render
     const auto* dbg = static_cast<const hdslave_desktop_debug_api_t*> (plug->get_extension (plug, "com.hdslave.desktop.debug/1"));
     int pPresets = 0;
     double renderMs = 0.0;
@@ -307,8 +356,32 @@ bool testOnePlugin (const std::string& clapPath, const std::string& snapDir)
                 std::fprintf (stderr, "FAIL: preset_load(%d) failed for %s\n", pi, desc->id);
                 return false;
             }
+            if (plug->on_main_thread) plug->on_main_thread (plug);
         }
-        if (pPresets > 0) dbg->preset_load (plug, 0);
+        if (pPresets > 0)
+        {
+            dbg->preset_load (plug, 0);
+            if (plug->on_main_thread) plug->on_main_thread (plug);
+        }
+
+        // Exercise live screen click/drag + process block to prove SafeOutputEvents brackets every tellHost push
+        dbg->ui_mouse (plug, 0, 200, 200, 0, 0, 0, 1);
+        dbg->ui_mouse (plug, 1, 260, 200, 0, 0, 0, 1);
+        dbg->ui_mouse (plug, 2, 260, 200, 0, 0, 0, 1);
+        dbg->ui_mouse (plug, 0, 200, 200, 0, 0, 0, 1);
+        dbg->ui_mouse (plug, 2, 200, 200, 0, 0, 0, 1);
+        ctx.lastOutTime = 0;
+        clap_process_t proc {};
+        proc.steady_time = 1024;
+        proc.frames_count = 256;
+        proc.audio_inputs = &inBuf;
+        proc.audio_inputs_count = 1;
+        proc.audio_outputs = &outBuf;
+        proc.audio_outputs_count = 1;
+        proc.in_events = &inEv;
+        proc.out_events = &outEv;
+        plug->process (plug, &proc);
+        if (plug->on_main_thread) plug->on_main_thread (plug);
 
         int pw = 0, ph = 0;
         const uint32_t* px = dbg->ui_render (plug, int (gw), int (gh), 1, &pw, &ph);

@@ -113,11 +113,35 @@ void CLAP_ABI proxyScreenRequestPaint (const clap_host_t* host)
 }
 const clap_host_melodee_screen_t kProxyHostScreen { proxyScreenRequestPaint };
 
+void scheduleMainThreadFlush (DesktopPlugin* dp)
+{
+    if (!dp || !dp->realHost) return;
+    if (dp->realHost->request_callback)
+    {
+        dp->realHost->request_callback (dp->realHost);
+    }
+    else
+    {
+        // Minimal hosts without request_callback: flush immediately on main thread.
+        const uint32_t flags = dp->pendingRescanFlags.exchange (0, std::memory_order_acq_rel);
+        if (flags != 0 && dp->hostParams && dp->hostParams->rescan)
+            dp->hostParams->rescan (dp->realHost, flags);
+        if (dp->pendingStateDirty.exchange (false, std::memory_order_acq_rel) && dp->hostState && dp->hostState->mark_dirty)
+            dp->hostState->mark_dirty (dp->realHost);
+    }
+}
+
 void CLAP_ABI tParamsRescan (const clap_host_t* h, clap_param_rescan_flags flags)
 {
     auto* dp = fromHost (h);
-    if (dp && dp->hostParams && dp->hostParams->rescan) dp->hostParams->rescan (dp->realHost, flags);
-    if (dp) dp->markAllDirty();
+    if (!dp) return;
+    dp->markAllDirty();
+    // During live screen input, the inner plug-in also queues p.outgoing for out_events; skip redundant main-thread
+    // rescan(VALUES) here so it never races against the audio thread's out_events in FL Studio.
+    if (dp->inScreenInput && flags == CLAP_PARAM_RESCAN_VALUES)
+        return;
+    dp->pendingRescanFlags.fetch_or (flags, std::memory_order_acq_rel);
+    scheduleMainThreadFlush (dp);
 }
 void CLAP_ABI tParamsClear (const clap_host_t* h, clap_id id, clap_param_clear_flags flags)
 {
@@ -127,26 +151,38 @@ void CLAP_ABI tParamsClear (const clap_host_t* h, clap_id id, clap_param_clear_f
 void CLAP_ABI tParamsRequestFlush (const clap_host_t* h)
 {
     auto* dp = fromHost (h);
-    if (dp && dp->hostParams && dp->hostParams->request_flush) dp->hostParams->request_flush (dp->realHost);
+    if (!dp) return;
+    // Only request a host flush when inactive/sleeping; when actively processing audio, process() drains right away.
+    if (dp->processing.load (std::memory_order_acquire) && (nowMs() - dp->lastProcessMs.load (std::memory_order_relaxed)) <= 40)
+        return;
+    if (dp->hostParams && dp->hostParams->request_flush) dp->hostParams->request_flush (dp->realHost);
 }
 const clap_host_params_t kProxyHostParams { tParamsRescan, tParamsClear, tParamsRequestFlush };
 
 void CLAP_ABI tPresetOnError (const clap_host_t* h, uint32_t kind, const char* location, const char* key, int32_t err, const char* msg)
 {
     auto* dp = fromHost (h);
-    if (dp && dp->hostPresetLoad && dp->hostPresetLoad->on_error) dp->hostPresetLoad->on_error (dp->realHost, kind, location, key, err, msg);
+    if (!dp || dp->inInternalPresetLoad) return;
+    if (dp->hostPresetLoad && dp->hostPresetLoad->on_error)
+        dp->hostPresetLoad->on_error (dp->realHost, kind, location ? location : "", key ? key : "", err, msg ? msg : "");
 }
 void CLAP_ABI tPresetLoaded (const clap_host_t* h, uint32_t kind, const char* location, const char* key)
 {
     auto* dp = fromHost (h);
-    if (dp && dp->hostPresetLoad && dp->hostPresetLoad->loaded) dp->hostPresetLoad->loaded (dp->realHost, kind, location, key);
+    // Never call host->loaded(..., nullptr, ...) during an internal GUI preset change: FL Studio did not initiate
+    // the load and can crash dereferencing a null location pointer. rescan(VALUES) + mark_dirty already sync the host.
+    if (!dp || dp->inInternalPresetLoad) return;
+    if (dp->hostPresetLoad && dp->hostPresetLoad->loaded)
+        dp->hostPresetLoad->loaded (dp->realHost, kind, location ? location : "", key ? key : "");
 }
 const clap_host_preset_load_t kProxyHostPresetLoad { tPresetOnError, tPresetLoaded };
 
 void CLAP_ABI tStateMarkDirty (const clap_host_t* h)
 {
     auto* dp = fromHost (h);
-    if (dp && dp->hostState && dp->hostState->mark_dirty) dp->hostState->mark_dirty (dp->realHost);
+    if (!dp) return;
+    dp->pendingStateDirty.store (true, std::memory_order_release);
+    scheduleMainThreadFlush (dp);
 }
 const clap_host_state_t kProxyHostState { tStateMarkDirty };
 
@@ -279,39 +315,125 @@ void discoverFactoryPresets (DesktopPlugin& dp)
 
 // Allocation-free merged input event list for audio thread / flush --------------------------------------------
 
-void pushHostParamValue (const clap_output_events_t* out, uint32_t time, clap_id id, double value)
+// Wraps the host's clap_output_events so every CLAP_EVENT_PARAM_VALUE sent to FL Studio (from our UI, MIDI CC
+// mapper, or any inner plug-in's tellHost/takeChange/button-release) has a valid param_id, finite clamped value,
+// monotonic timestamp, and is ALWAYS bracketed by CLAP_EVENT_PARAM_GESTURE_BEGIN / END.
+struct SafeOutputEvents
 {
-    if (!out || !out->try_push) return;
-    clap_event_param_value_t ev {};
-    ev.header.size = sizeof (ev);
-    ev.header.time = time;
-    ev.header.space_id = CLAP_CORE_EVENT_SPACE_ID;
-    ev.header.type = CLAP_EVENT_PARAM_VALUE;
-    ev.header.flags = 0;
-    ev.param_id = id;
-    ev.cookie = nullptr;
-    ev.note_id = -1;
-    ev.port_index = -1;
-    ev.channel = -1;
-    ev.key = -1;
-    ev.value = value;
-    out->try_push (out, &ev.header);
-}
+    DesktopPlugin* dp = nullptr;
+    const clap_output_events_t* hostOut = nullptr;
+    uint32_t maxTime = 0;
+    uint32_t lastTime = 0;
 
-void pushHostParamGesture (const clap_output_events_t* out, uint32_t time, clap_id id, bool begin)
-{
-    if (!out || !out->try_push) return;
-    clap_event_param_gesture_t ev {};
-    ev.header.size = sizeof (ev);
-    ev.header.time = time;
-    ev.header.space_id = CLAP_CORE_EVENT_SPACE_ID;
-    ev.header.type = begin ? CLAP_EVENT_PARAM_GESTURE_BEGIN : CLAP_EVENT_PARAM_GESTURE_END;
-    ev.header.flags = 0;
-    ev.param_id = id;
-    out->try_push (out, &ev.header);
-}
+    bool pushRaw (const clap_event_header_t* h)
+    {
+        if (!hostOut || !hostOut->try_push || !h) return false;
+        return hostOut->try_push (hostOut, h);
+    }
 
-void drainUiAndMidiEvents (DesktopPlugin& dp, MergedInputEvents& merged, const clap_input_events_t* in, const clap_output_events_t* out)
+    uint32_t clampTime (uint32_t t)
+    {
+        if (t > maxTime) t = maxTime;
+        if (t < lastTime) t = lastTime;
+        lastTime = t;
+        return t;
+    }
+
+    bool pushGesture (uint32_t time, clap_id id, bool begin)
+    {
+        if (!dp || !hostOut || !hostOut->try_push) return false;
+        if (begin)
+        {
+            if (dp->openGestureParamId == id) return true;
+            if (dp->openGestureParamId != CLAP_INVALID_ID)
+                pushGesture (time, dp->openGestureParamId, false);
+        }
+        else
+        {
+            if (dp->openGestureParamId != id) return true;
+        }
+        clap_event_param_gesture_t ev {};
+        ev.header.size = sizeof (ev);
+        ev.header.time = clampTime (time);
+        ev.header.space_id = CLAP_CORE_EVENT_SPACE_ID;
+        ev.header.type = begin ? CLAP_EVENT_PARAM_GESTURE_BEGIN : CLAP_EVENT_PARAM_GESTURE_END;
+        ev.header.flags = 0;
+        ev.param_id = id;
+        const bool ok = pushRaw (&ev.header);
+        if (ok) dp->openGestureParamId = begin ? id : CLAP_INVALID_ID;
+        return ok;
+    }
+
+    bool pushParamValue (uint32_t time, clap_id id, double value)
+    {
+        if (!dp || !hostOut || !hostOut->try_push) return false;
+        const int idx = dp->findParamIndex (id);
+        if (idx < 0) return false;
+        const auto& p = dp->params[size_t (idx)];
+        if (!std::isfinite (value)) value = p.defVal;
+        value = std::clamp (value, p.minVal, p.maxVal);
+
+        const uint32_t t = clampTime (time);
+        const bool alreadyOpen = (dp->openGestureParamId == id);
+        if (!alreadyOpen)
+        {
+            if (dp->openGestureParamId != CLAP_INVALID_ID)
+            {
+                // Keep another active UI drag clean: don't interleave a bare background edit mid-gesture.
+                return true;
+            }
+            if (!pushGesture (t, id, true)) return false;
+        }
+
+        clap_event_param_value_t ev {};
+        ev.header.size = sizeof (ev);
+        ev.header.time = t;
+        ev.header.space_id = CLAP_CORE_EVENT_SPACE_ID;
+        ev.header.type = CLAP_EVENT_PARAM_VALUE;
+        ev.header.flags = 0;
+        ev.param_id = id;
+        ev.cookie = nullptr;
+        ev.note_id = -1;
+        ev.port_index = -1;
+        ev.channel = -1;
+        ev.key = -1;
+        ev.value = value;
+        const bool ok = pushRaw (&ev.header);
+
+        if (!alreadyOpen)
+            pushGesture (t, id, false);
+        return ok;
+    }
+
+    static bool CLAP_ABI tryPushCb (const clap_output_events_t* list, const clap_event_header_t* h)
+    {
+        auto* self = static_cast<SafeOutputEvents*> (list->ctx);
+        if (!self || !self->hostOut || !self->hostOut->try_push || !h) return false;
+        if (h->space_id == CLAP_CORE_EVENT_SPACE_ID)
+        {
+            if (h->type == CLAP_EVENT_PARAM_VALUE)
+            {
+                const auto* pv = reinterpret_cast<const clap_event_param_value_t*> (h);
+                return self->pushParamValue (h->time, pv->param_id, pv->value);
+            }
+            if (h->type == CLAP_EVENT_PARAM_GESTURE_BEGIN)
+            {
+                const auto* pg = reinterpret_cast<const clap_event_param_gesture_t*> (h);
+                return self->pushGesture (h->time, pg->param_id, true);
+            }
+            if (h->type == CLAP_EVENT_PARAM_GESTURE_END)
+            {
+                const auto* pg = reinterpret_cast<const clap_event_param_gesture_t*> (h);
+                return self->pushGesture (h->time, pg->param_id, false);
+            }
+        }
+        return self->pushRaw (h);
+    }
+
+    clap_output_events_t asClapList() { return clap_output_events_t { this, tryPushCb }; }
+};
+
+void drainUiAndMidiEvents (DesktopPlugin& dp, MergedInputEvents& merged, const clap_input_events_t* in, SafeOutputEvents& out)
 {
     merged.reset (in);
 
@@ -320,13 +442,13 @@ void drainUiAndMidiEvents (DesktopPlugin& dp, MergedInputEvents& merged, const c
     while (dp.uiToAudio.pop (uev))
     {
         if (uev.kind == UiEventKind::GestureBegin)
-            pushHostParamGesture (out, 0, uev.paramId, true);
+            out.pushGesture (0, uev.paramId, true);
         else if (uev.kind == UiEventKind::GestureEnd)
-            pushHostParamGesture (out, 0, uev.paramId, false);
+            out.pushGesture (0, uev.paramId, false);
         else
         {
             merged.addInjected (0, uev.paramId, uev.value);
-            pushHostParamValue (out, 0, uev.paramId, uev.value);
+            out.pushParamValue (0, uev.paramId, uev.value);
         }
     }
 
@@ -359,7 +481,7 @@ void drainUiAndMidiEvents (DesktopPlugin& dp, MergedInputEvents& merged, const c
         double v = p.minVal + (double (val) / 127.0) * p.range();
         if (p.isStepped()) v = std::clamp (std::round (v), p.minVal, p.maxVal);
         merged.addInjected (h->time, mappedId, v);
-        pushHostParamValue (out, h->time, mappedId, v);
+        out.pushParamValue (h->time, mappedId, v);
     }
 
     merged.finish();
@@ -448,9 +570,15 @@ void CLAP_ABI wrapParamsFlush (const clap_plugin_t* p, const clap_input_events_t
 {
     auto& dp = of (p);
     if (!dp.innerParams) return;
-    drainUiAndMidiEvents (dp, *dp.merged, in, out);
-    clap_input_events_t inList = dp.merged->asClapList();
-    dp.innerParams->flush (dp.inner, &inList, out);
+    // Never race a main-thread flush against an in-flight audio-thread process() call.
+    if (dp.inAudioCall.exchange (true, std::memory_order_acq_rel))
+        return;
+    SafeOutputEvents safeOut { &dp, out, 0, 0 };
+    drainUiAndMidiEvents (dp, *dp.mergedFlush, in, safeOut);
+    clap_input_events_t inList = dp.mergedFlush->asClapList();
+    clap_output_events_t outList = safeOut.asClapList();
+    dp.innerParams->flush (dp.inner, &inList, out ? &outList : nullptr);
+    dp.inAudioCall.store (false, std::memory_order_release);
 }
 
 const clap_plugin_params_t kWrapParamsExt {
@@ -777,24 +905,32 @@ void CLAP_ABI wrapDestroy (const clap_plugin_t* p)
 bool CLAP_ABI wrapActivate (const clap_plugin_t* p, double sr, uint32_t minF, uint32_t maxF)
 {
     auto& dp = of (p);
-    return dp.inner && dp.inner->activate (dp.inner, sr, minF, maxF);
+    const bool ok = dp.inner && dp.inner->activate (dp.inner, sr, minF, maxF);
+    dp.active.store (ok, std::memory_order_release);
+    return ok;
 }
 
 void CLAP_ABI wrapDeactivate (const clap_plugin_t* p)
 {
     auto& dp = of (p);
+    dp.processing.store (false, std::memory_order_release);
+    dp.active.store (false, std::memory_order_release);
+    dp.openGestureParamId = CLAP_INVALID_ID;
     if (dp.inner) dp.inner->deactivate (dp.inner);
 }
 
 bool CLAP_ABI wrapStartProcessing (const clap_plugin_t* p)
 {
     auto& dp = of (p);
-    return dp.inner && dp.inner->start_processing (dp.inner);
+    const bool ok = dp.inner && dp.inner->start_processing (dp.inner);
+    dp.processing.store (ok, std::memory_order_release);
+    return ok;
 }
 
 void CLAP_ABI wrapStopProcessing (const clap_plugin_t* p)
 {
     auto& dp = of (p);
+    dp.processing.store (false, std::memory_order_release);
     if (dp.inner) dp.inner->stop_processing (dp.inner);
 }
 
@@ -809,15 +945,24 @@ clap_process_status CLAP_ABI wrapProcess (const clap_plugin_t* p, const clap_pro
     auto& dp = of (p);
     if (!dp.inner) return CLAP_PROCESS_ERROR;
 
+    dp.inAudioCall.store (true, std::memory_order_release);
+    dp.lastProcessMs.store (nowMs(), std::memory_order_relaxed);
+
     if (proc->transport)
         dp.transportPlaying.store ((proc->transport->flags & CLAP_TRANSPORT_IS_PLAYING) != 0, std::memory_order_relaxed);
 
-    drainUiAndMidiEvents (dp, *dp.merged, proc->in_events, proc->out_events);
+    const uint32_t maxTime = proc->frames_count > 0 ? proc->frames_count - 1 : 0;
+    SafeOutputEvents safeOut { &dp, proc->out_events, maxTime, 0 };
+    drainUiAndMidiEvents (dp, *dp.mergedProcess, proc->in_events, safeOut);
 
     clap_process_t wrapped = *proc;
-    clap_input_events_t inList = dp.merged->asClapList();
+    clap_input_events_t inList = dp.mergedProcess->asClapList();
+    clap_output_events_t outList = safeOut.asClapList();
     wrapped.in_events = &inList;
-    return dp.inner->process (dp.inner, &wrapped);
+    wrapped.out_events = proc->out_events ? &outList : nullptr;
+    const clap_process_status st = dp.inner->process (dp.inner, &wrapped);
+    dp.inAudioCall.store (false, std::memory_order_release);
+    return st;
 }
 
 // Test hook (com.hdslave.desktop.debug/1) for off-screen rendering & input tests in tests/host_test.cpp
@@ -902,6 +1047,13 @@ void CLAP_ABI wrapOnMainThread (const clap_plugin_t* p)
     auto& dp = of (p);
     if (dp.inner && dp.inner->on_main_thread)
         dp.inner->on_main_thread (dp.inner);
+
+    // Deliver any deferred host notifications safely on the host's own main-thread callback tick.
+    const uint32_t rescanFlags = dp.pendingRescanFlags.exchange (0, std::memory_order_acq_rel);
+    if (rescanFlags != 0 && dp.hostParams && dp.hostParams->rescan)
+        dp.hostParams->rescan (dp.realHost, rescanFlags);
+    if (dp.pendingStateDirty.exchange (false, std::memory_order_acq_rel) && dp.hostState && dp.hostState->mark_dirty)
+        dp.hostState->mark_dirty (dp.realHost);
 }
 
 // Wrapped Factory ---------------------------------------------------------------------------------------------
@@ -1006,15 +1158,18 @@ uint64_t nowMs()
 
 DesktopPlugin::DesktopPlugin()
 {
-    merged = new MergedInputEvents();
+    mergedProcess = new MergedInputEvents();
+    mergedFlush = new MergedInputEvents();
     for (int i = 0; i < 128; ++i)
         ccMap[i].store (CLAP_INVALID_ID, std::memory_order_relaxed);
 }
 
 DesktopPlugin::~DesktopPlugin()
 {
-    delete merged;
-    merged = nullptr;
+    delete mergedProcess;
+    mergedProcess = nullptr;
+    delete mergedFlush;
+    mergedFlush = nullptr;
 }
 
 void DesktopPlugin::resolveHostExtensions()
@@ -1069,10 +1224,17 @@ std::string DesktopPlugin::formatParamValue (clap_id id, double value) const
 void DesktopPlugin::enqueue (UiEventKind kind, clap_id id, double value)
 {
     uiToAudio.push ({ kind, id, value });
-    if (hostParams && hostParams->request_flush)
-        hostParams->request_flush (realHost);
-    else if (realHost && realHost->request_process)
-        realHost->request_process (realHost);
+    // When the audio thread is actively running process(), it drains uiToAudio on the very next audio block;
+    // avoid spamming request_flush() mid-stream (which can trigger concurrent main-thread flush in some hosts).
+    const bool audioTicking = processing.load (std::memory_order_acquire)
+                           && (nowMs() - lastProcessMs.load (std::memory_order_relaxed)) <= 40;
+    if (!audioTicking)
+    {
+        if (hostParams && hostParams->request_flush)
+            hostParams->request_flush (realHost);
+        else if (realHost && realHost->request_process)
+            realHost->request_process (realHost);
+    }
 }
 
 void DesktopPlugin::beginEdit (int index)
@@ -1124,15 +1286,18 @@ bool DesktopPlugin::loadPresetByIndex (int idx)
     if (!innerPresetLoad || idx < 0 || idx >= int (presets.size()))
         return false;
     resolveHostExtensions();
+    inInternalPresetLoad = true;
     const bool ok = innerPresetLoad->from_location (inner, CLAP_PRESET_DISCOVERY_LOCATION_PLUGIN,
                                                     nullptr, presets[size_t (idx)].loadKey.c_str());
+    inInternalPresetLoad = false;
     if (ok)
     {
         currentPresetIndex = idx;
         markAllDirty();
         refreshScreenKnobs();
-        if (hostState && hostState->mark_dirty)
-            hostState->mark_dirty (realHost);
+        pendingRescanFlags.fetch_or (CLAP_PARAM_RESCAN_VALUES, std::memory_order_acq_rel);
+        pendingStateDirty.store (true, std::memory_order_release);
+        scheduleMainThreadFlush (this);
     }
     return ok;
 }
@@ -1187,7 +1352,9 @@ void DesktopPlugin::sendScreenInput (uint32_t kind, int32_t value)
 {
     if (!innerScreen || !innerScreen->input) return;
     melodee_screen_input_t inp { kind, value, screenShift };
+    inScreenInput = true;
     innerScreen->input (inner, &inp);
+    inScreenInput = false;
     refreshScreenKnobs();
     screenRequested.store (true, std::memory_order_release);
 }
