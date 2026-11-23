@@ -349,7 +349,20 @@ bool testOnePlugin (const std::string& clapPath, const std::string& snapDir)
     {
         if (!dbg->ui_open (plug)) return false;
         pPresets = dbg->preset_count (plug);
-        for (int pi = 0; pi < pPresets && pi < 5; ++pi)
+        clap_event_note_t testNote {};
+        testNote.header = { sizeof (testNote), 0, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_NOTE_ON, 0 };
+        testNote.note_id = -1;
+        testNote.port_index = 0;
+        testNote.channel = 0;
+        testNote.key = 48;
+        testNote.velocity = 0.85;
+        auto oneNoteSize = [] (const clap_input_events_t*) -> uint32_t { return 1; };
+        auto oneNoteGet = [] (const clap_input_events_t* l, uint32_t) -> const clap_event_header_t* {
+            return static_cast<const clap_event_header_t*> (l->ctx);
+        };
+        clap_input_events_t noteIn { &testNote.header, oneNoteSize, oneNoteGet };
+
+        for (int pi = 0; pi < pPresets; ++pi)
         {
             if (!dbg->preset_load (plug, pi))
             {
@@ -357,6 +370,31 @@ bool testOnePlugin (const std::string& clapPath, const std::string& snapDir)
                 return false;
             }
             if (plug->on_main_thread) plug->on_main_thread (plug);
+
+            // Render 6 blocks with a note-on + subtle audio input to catch any NaN/Inf in every single preset!
+            for (int blk = 0; blk < 6; ++blk)
+            {
+                for (int i = 0; i < 256; ++i) inL[i] = inR[i] = 0.1f * std::sin (float (i) * 0.05f);
+                ctx.lastOutTime = 0;
+                clap_process_t proc {};
+                proc.steady_time = (pi * 6 + blk) * 256;
+                proc.frames_count = 256;
+                proc.audio_inputs = &inBuf;
+                proc.audio_inputs_count = 1;
+                proc.audio_outputs = &outBuf;
+                proc.audio_outputs_count = 1;
+                proc.in_events = (blk == 0) ? &noteIn : &inEv;
+                proc.out_events = &outEv;
+                plug->process (plug, &proc);
+                for (int i = 0; i < 256; ++i)
+                {
+                    if (!std::isfinite (outL[i]) || !std::isfinite (outR[i]))
+                    {
+                        std::fprintf (stderr, "FAIL: non-finite audio on preset %d in %s\n", pi, desc->id);
+                        return false;
+                    }
+                }
+            }
         }
         if (pPresets > 0)
         {

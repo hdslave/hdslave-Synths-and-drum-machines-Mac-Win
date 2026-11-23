@@ -248,8 +248,12 @@ private:
         const int top = std::min<int> (harmonics, (int) n / 2 - 1);
         for (int h = 1; h <= top; ++h)
         {
-            // sin (t + p) = Im (e^{i (t + p)}): the bin h coefficient is -i/2 e^{ip}, the bin n - h its conjugate
-            const std::complex<double> c = std::polar (0.5 * a[(size_t) (h - 1)], phase[(size_t) (h - 1)] - M_PI / 2.0);
+            // sin (t + p) = Im (e^{i (t + p)}): the bin h coefficient is -i/2 e^{ip}, the bin n - h its conjugate.
+            // Note: libc++ std::polar(rho, theta) returns NaN when rho < 0 (waves 1, 3, 8 use negative harmonics), so
+            // compute cos/sin directly.
+            const double amp = 0.5 * a[(size_t) (h - 1)];
+            const double ang = phase[(size_t) (h - 1)] - M_PI / 2.0;
+            const std::complex<double> c (amp * std::cos (ang), amp * std::sin (ang));
             x[(size_t) h] = c;
             x[(size_t) (n - (uint32_t) h)] = std::conj (c);
         }
