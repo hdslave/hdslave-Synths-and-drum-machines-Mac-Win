@@ -10,13 +10,13 @@ git clone --recurse-submodules https://github.com/hdslave/hdslave-Synths-and-dru
 
 <sub>Already cloned without <code>--recurse-submodules</code>? Run <code>git submodule update --init</code> inside the folder.</sub>
 
-> **Looking for the Akai MPC Sample versions &amp; hdslaveOS?** See the companion MPC Sample hub at [**hdslave-MPCSample-Synths-and-Drum-Machines**](https://github.com/hdslave/hdslave-MPCSample-Synths-and-Drum-Machines) and [**hdslaveOS**](https://github.com/hdslave/hdslaveOS). Releases on the individual repositories remain MPC Sample-only for now while the desktop builds are being finalized.
+> **Looking for the Akai MPC Sample versions &amp; hdslaveOS?** See the companion MPC Sample hub at [**hdslave-MPCSample-Synths-and-Drum-Machines**](https://github.com/hdslave/hdslave-MPCSample-Synths-and-Drum-Machines) and [**hdslaveOS**](https://github.com/hdslave/hdslaveOS).
 
 ---
 
 ## Desktop CLAP Highlights
 
-- **All MPC Screens on One Panel:** every plug-in renders all of its native hardware screens simultaneously in a resizable Retina/HiDPI multi-screen dashboard (with the hardware `K1`–`K3` footer panels removed), plus a **`ZOOM`** toggle for any individual screen.
+- **Resizable panels.** Reverie combines its six sections on one instrument panel. The other plug-ins show their hardware screens together in a Retina/HiDPI dashboard with a **`ZOOM`** toggle for individual screens.
 - **Direct Mouse, Trackpad &amp; Touch Control:** click, drag (`Shift`+drag for fine control), scroll, double-click to reset, or right-click any parameter cell, list row, 2D X/Y pad, 3D morphing cube, step sequencer bar, punch-card bit, rhythm wheel, or audition pad directly inside any screen.
 - **Built-in MIDI Learn &amp; DAW Integration:** bind hardware MIDI CCs via **MIDI LEARN** or right-click (saved in DAW project state), browse factory presets from the header bar, and automate every parameter natively in FL Studio and other CLAP hosts.
 - **Native Zero-Bloat Backends:** Cocoa (`NSView` + CoreGraphics) on macOS and Win32 (`HWND` + `StretchDIBits`) on Windows x64.
@@ -68,12 +68,13 @@ git clone --recurse-submodules https://github.com/hdslave/hdslave-Synths-and-dru
   </tr>
   <tr>
     <td width="400" align="center">
-      <a href="https://github.com/hdslave/hdslave-Reverie-Synth/tree/main/mac-clap"><img src="docs/previews/reverie.png" alt="Reverie 6-screen desktop CLAP interface" width="380"></a>
+      <a href="https://github.com/hdslave/hdslave-Reverie-Synth/tree/main/mac-clap"><img src="docs/previews/reverie.png" alt="Reverie desktop panel with chord pads, a glass Motion orb, and an aquarium above the output meter" width="380"></a>
     </td>
     <td>
       <h3><a href="https://github.com/hdslave/hdslave-Reverie-Synth">Reverie</a> &middot; <a href="https://github.com/hdslave/hdslave-Reverie-Synth/tree/main/mac-clap"><code>mac-clap/</code></a></h3>
-      <p><strong>Chord-progression &amp; X/Y Motion pad synthesizer (6 screens, 80 params).</strong></p>
+      <p><strong>Chord-progression &amp; X/Y Motion pad synthesizer with 80 parameters.</strong></p>
       <p>Play the 16 chord pads and mini keyboard directly, drag the 2D Motion X/Y glass orb, sculpt dual morphing wavetable oscillators, filter/amp envelopes, LFO, ensemble, delay, and shimmer reverb all on one panel.</p>
+      <p><a href="https://github.com/hdslave/hdslave-Reverie-Synth/releases/tag/desktop-v0.1.7">Download Reverie 0.1.7 for macOS and Windows</a></p>
     </td>
   </tr>
   <tr>
