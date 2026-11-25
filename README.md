@@ -10,7 +10,8 @@ Select a macOS or Windows panel to open its project and see the desktop and MPC 
       <a href="https://github.com/hdslave/hdslave-Reverie-Synth"><img src="https://raw.githubusercontent.com/hdslave/hdslave-Reverie-Synth/main/mac-clap/assets/desktop-preview.gif" alt="Reverie chord pads, Motion orb and output meter during playback" width="440"><br><strong>Reverie</strong></a>
     </td>
     <td width="50%" align="center">
-      <a href="https://github.com/hdslave/TB-MPC-3-P-0-Synthesizer"><img src="https://raw.githubusercontent.com/hdslave/TB-MPC-3-P-0-Synthesizer/main/mac-clap/assets/desktop-preview.gif" alt="TB-MPC-3-P-0 acid bass sequencer and voice controls during playback" width="440"><br><strong>TB-MPC-3-P-0</strong></a>
+      <a href="https://github.com/hdslave/hdslave-Slink-Synth"><img src="https://raw.githubusercontent.com/hdslave/hdslave-Slink-Synth/main/mac-clap/assets/desktop-preview.gif" alt="Slink acid bass sequencer and voice controls during playback" width="440"><br><strong>Slink</strong></a><br>
+      <a href="https://github.com/hdslave/hdslave-Slink-Synth/releases/tag/v0.6.0">Download for macOS or Windows</a>
     </td>
   </tr>
   <tr>

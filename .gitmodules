@@ -1,6 +1,6 @@
-[submodule "TB-MPC-3-P-0"]
-	path = TB-MPC-3-P-0
-	url = https://github.com/hdslave/TB-MPC-3-P-0-Synthesizer.git
+[submodule "Slink"]
+	path = Slink
+	url = https://github.com/hdslave/hdslave-Slink-Synth.git
 	branch = main
 [submodule "Psychic"]
 	path = Psychic

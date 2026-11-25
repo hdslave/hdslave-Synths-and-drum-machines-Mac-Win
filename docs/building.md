@@ -4,7 +4,7 @@
 git clone --recurse-submodules https://github.com/hdslave/hdslave-Synths-and-drum-machines-Mac-Win.git
 ```
 
-Run the commands below from the cloned repository.
+Run the commands below from the cloned repository. Prebuilt Apple Silicon, Intel Mac and Windows x64 editions of [Slink are available here](https://github.com/hdslave/hdslave-Slink-Synth/releases/tag/v0.6.0).
 
 ## macOS (Apple Silicon / Intel)
 

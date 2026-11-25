@@ -1,7 +1,7 @@
 ﻿$ErrorActionPreference = "Stop"
 
 $Root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
-$Plugins = @("Anvil", "Cortex-Filter", "Foundry", "Machine", "MoonBass", "Mystik", "Necronomicon", "Nexus", "Psychic", "Reverie", "TB-MPC-3-P-0")
+$Plugins = @("Anvil", "Cortex-Filter", "Foundry", "Machine", "MoonBass", "Mystik", "Necronomicon", "Nexus", "Psychic", "Reverie", "Slink")
 
 foreach ($p in $Plugins) {
     $Script = Join-Path $Root "$p\mac-clap\build-windows.ps1"

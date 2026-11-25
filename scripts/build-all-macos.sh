@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-PLUGINS=(Anvil Cortex-Filter Foundry Machine MoonBass Mystik Necronomicon Nexus Psychic Reverie TB-MPC-3-P-0)
+PLUGINS=(Anvil Cortex-Filter Foundry Machine MoonBass Mystik Necronomicon Nexus Psychic Reverie Slink)
 
 for p in "${PLUGINS[@]}"; do
     script="$ROOT/$p/mac-clap/build-macos.sh"
