@@ -11,7 +11,7 @@ Select a macOS or Windows panel to open its project and see the desktop and MPC 
     </td>
     <td width="50%" align="center">
       <a href="https://github.com/hdslave/hdslave-Slink-Synth"><img src="https://raw.githubusercontent.com/hdslave/hdslave-Slink-Synth/main/mac-clap/assets/desktop-preview.gif" alt="Slink acid bass sequencer and voice controls during playback" width="440"><br><strong>Slink</strong></a><br>
-      <a href="https://github.com/hdslave/hdslave-Slink-Synth/releases/tag/v0.6.0">Download for macOS or Windows</a>
+      <a href="https://github.com/hdslave/hdslave-Slink-Synth/releases/tag/v0.6.0">Download for macOS or Windows</a> · <a href="https://github.com/hdslave/hdslave-Slink-Synth/blob/v0.6.1/docs/screen.md#silver-panel-on-mpc">View the MPC panel</a>
     </td>
   </tr>
   <tr>
