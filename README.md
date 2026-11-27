@@ -11,7 +11,7 @@ Select a macOS or Windows panel to open its project and see the desktop and MPC 
     </td>
     <td width="50%" align="center">
       <a href="https://github.com/hdslave/hdslave-Slink-Synth"><img src="https://raw.githubusercontent.com/hdslave/hdslave-Slink-Synth/667d967e53033010c330d335e746a84e3a3411a8/mac-clap/assets/desktop-preview.gif" alt="Slink 0.9.10 playing in the Thorn Crown desktop editor" width="440"><br><strong>Slink</strong></a><br>
-      <a href="https://github.com/hdslave/hdslave-Slink-Synth#downloads">Desktop downloads</a> · <a href="https://github.com/hdslave/hdslave-Slink-Synth/blob/667d967e53033010c330d335e746a84e3a3411a8/mac-clap/assets/slink-desktop-playback.mp4?raw=1">Watch with audio</a> · <a href="https://github.com/hdslave/hdslave-Slink-Synth/blob/main/docs/screen.md#silver-panel-on-mpc">MPC panel</a>
+      <a href="https://github.com/hdslave/hdslave-Slink-Synth/releases/download/v0.9.10/Slink-0.9.10-macOS-universal.zip">macOS 0.9.10 (universal)</a> · <a href="https://github.com/hdslave/hdslave-Slink-Synth/releases/download/v0.9.10/Slink-0.9.10-Windows-x64.zip">Windows 0.9.10 (x64)</a> · <a href="https://github.com/hdslave/hdslave-Slink-Synth/blob/667d967e53033010c330d335e746a84e3a3411a8/mac-clap/assets/slink-desktop-playback.mp4?raw=1">Watch with audio</a> · <a href="https://github.com/hdslave/hdslave-Slink-Synth/blob/main/docs/screen.md#silver-panel-on-mpc">MPC panel</a>
     </td>
   </tr>
   <tr>
