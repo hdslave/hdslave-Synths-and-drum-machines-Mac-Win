@@ -10,8 +10,8 @@ Select a macOS or Windows panel to open its project and see the desktop and MPC 
       <a href="https://github.com/hdslave/hdslave-Reverie-Synth"><img src="https://raw.githubusercontent.com/hdslave/hdslave-Reverie-Synth/main/mac-clap/assets/desktop-preview.gif" alt="Reverie chord pads, Motion orb and output meter during playback" width="440"><br><strong>Reverie</strong></a>
     </td>
     <td width="50%" align="center">
-      <a href="https://github.com/hdslave/hdslave-Slink-Synth"><img src="https://raw.githubusercontent.com/hdslave/hdslave-Slink-Synth/main/mac-clap/assets/desktop-preview.gif" alt="Slink acid bass sequencer and voice controls during playback" width="440"><br><strong>Slink</strong></a><br>
-      <a href="https://github.com/hdslave/hdslave-Slink-Synth/releases/tag/v0.6.0">Download for macOS or Windows</a> · <a href="https://github.com/hdslave/hdslave-Slink-Synth/blob/v0.6.1/docs/screen.md#silver-panel-on-mpc">View the MPC panel</a>
+      <a href="https://github.com/hdslave/hdslave-Slink-Synth"><img src="https://raw.githubusercontent.com/hdslave/hdslave-Slink-Synth/667d967e53033010c330d335e746a84e3a3411a8/mac-clap/assets/desktop-preview.gif" alt="Slink 0.9.10 playing in the Thorn Crown desktop editor" width="440"><br><strong>Slink</strong></a><br>
+      <a href="https://github.com/hdslave/hdslave-Slink-Synth#downloads">Desktop downloads</a> · <a href="https://github.com/hdslave/hdslave-Slink-Synth/blob/667d967e53033010c330d335e746a84e3a3411a8/mac-clap/assets/slink-desktop-playback.mp4?raw=1">Watch with audio</a> · <a href="https://github.com/hdslave/hdslave-Slink-Synth/blob/main/docs/screen.md#silver-panel-on-mpc">MPC panel</a>
     </td>
   </tr>
   <tr>

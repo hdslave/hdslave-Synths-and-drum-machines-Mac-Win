@@ -1,7 +1,7 @@
 [submodule "Slink"]
 	path = Slink
 	url = https://github.com/hdslave/hdslave-Slink-Synth.git
-	branch = main
+	branch = codex/slink-desktop-sp16
 [submodule "Psychic"]
 	path = Psychic
 	url = https://github.com/hdslave/hdslave-Psychic-Synth.git

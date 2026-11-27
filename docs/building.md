@@ -4,7 +4,7 @@
 git clone --recurse-submodules https://github.com/hdslave/hdslave-Synths-and-drum-machines-Mac-Win.git
 ```
 
-Run the commands below from the cloned repository. Prebuilt Apple Silicon, Intel Mac and Windows x64 editions of [Slink are available here](https://github.com/hdslave/hdslave-Slink-Synth/releases/tag/v0.6.0).
+Run the commands below from the cloned repository. The Slink submodule builds the 0.9.10 desktop editor for Apple Silicon, Intel Mac and Windows x64. [Packaged downloads](https://github.com/hdslave/hdslave-Slink-Synth#downloads)
 
 ## macOS (Apple Silicon / Intel)
 
@@ -36,7 +36,7 @@ Copy the built `.clap` files from each `<Plugin>\mac-clap\build\windows\clap\Rel
 
 ## Keeping It Current
 
-Submodule folders stay at their pinned commits until updated. Run `tools/update.sh` to advance every plug-in folder to the latest commit on `main` and commit the updated pins; then `git push` to publish.
+Submodule folders stay at their pinned commits until updated. Run `tools/update.sh` to advance every plug-in folder to the latest commit on its branch in `.gitmodules` and commit the updated pins; then `git push` to publish.
 
 ## Trademarks &amp; Licences
 
