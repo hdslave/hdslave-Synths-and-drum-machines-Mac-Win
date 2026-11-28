@@ -4,7 +4,7 @@
 git clone --recurse-submodules https://github.com/hdslave/hdslave-Synths-and-drum-machines-Mac-Win.git
 ```
 
-Run the commands below from the cloned repository. The Slink submodule builds the 0.9.10 desktop editor for Apple Silicon, Intel Mac and Windows x64. [0.9.10 downloads and checksums](https://github.com/hdslave/hdslave-Slink-Synth/releases/tag/v0.9.10)
+Run the commands below from the cloned repository. The Slink submodule builds the 0.9.11 desktop editor for Apple Silicon, Intel Mac and Windows x64. [0.9.11 downloads and checksums](https://github.com/hdslave/hdslave-Slink-Synth/releases/tag/v0.9.11)
 
 ## macOS (Apple Silicon / Intel)
 
